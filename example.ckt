@@ -1,0 +1,20 @@
+use io;
+
+circ Buf<I> {
+    let in: [Input; I];
+    let out: [Output; I];
+
+    in > out;
+}
+
+circ {
+    let input: io.SerialIn;
+    let output: io.SerialOut;
+
+    let gate: And<3>;
+    let buf: Buf<3>;
+
+    input > buf.in[0:2];
+    buf > gate;
+    gate > output;
+}
