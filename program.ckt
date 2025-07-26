@@ -1,0 +1,23 @@
+import std;
+
+circ Foo {
+    -> a[2], b[2];
+    <- q[2];
+
+    with std:And and1, and2;
+
+    a[0] -> and1.a;
+    a[1] -> and2.a;
+    b[0] -> and1.b;
+    b[1] -> and2.b;
+
+    and1.q -> q[0];
+    and2.q -> q[1];
+}
+
+circ Main {
+    with Foo test;
+
+    1 -> test.a;
+    0 -> test.b;
+}

@@ -1,0 +1,12 @@
+[package]
+name = "circuit2"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libcircuit = { path = "./libcircuit" }
+
+[features]
+default = ["parser", "analyser"]
+parser = ["libcircuit/parser"]
+analyser = ["libcircuit/analyser"]
