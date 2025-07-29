@@ -8,8 +8,8 @@ use crate::util::{ChainMap, Pos, Position};
 use core::iter::Peekable;
 
 use crate::ast::{
-    Associativity, ConstExprOpType, Decl, Node, NodeType, PinDirection, PinExprOpType, Range,
-    StatementType, AST,
+    Associativity, ConnectionDirection, ConstExprOpType, Decl, Node, NodeType, PinDirection,
+    PinExprOpType, Range, StatementType, AST,
 };
 
 #[derive(Debug)]
@@ -688,60 +688,52 @@ impl<'a> Parser<'a> {
     fn parse_statement(&mut self) -> ParseResult<Node> {
         let tk = self.peek_next_token()?;
 
-        match tk.token_type() {
-            tt::Punctuation(pt::Semicolon) => {
-                self.consume_token()?;
-                ParseResult::none()
-            }
-            tt::Punctuation(pt::LArrow | pt::RArrow) | tt::Ident(..) => self.parse_line_statement(),
-            tt::Keyword(kt::Assert | kt::Const | kt::If | kt::With) => self.parse_block_statement(),
-            // tt::Keyword(kt::For | kt::With) => self.parse_block_statement(),
-            _ => {
-                self.add_error(self.expected_error(
-                    &[
-                        keyword!(Assert),
-                        keyword!(Const),
-                        keyword!(For),
-                        keyword!(With),
-                        keyword!(If),
-                        punctuation!(LArrow),
-                        punctuation!(RArrow),
-                        ident!(),
-                    ],
-                    &tk,
-                ));
-                recover!()
-            }
-        }
-    }
-
-    fn parse_line_statement(&mut self) -> ParseResult<Node> {
         let result = recover!(
             self,
             {
-                let statement = match self.peek_next_token()?.token_type() {
-                    tt::Punctuation(pt::LArrow | pt::RArrow) => self.parse_pindecl()?,
-                    tt::Ident(..) => Some(self.parse_pinexpr()?),
-                    _ => unreachable!(
-                        "parse_line_statement should only be called for line keywords / idents"
-                    ),
-                };
-
-                self.expect_next_token_is(punctuation!(Semicolon))?;
-
-                Ok(statement)
+                match tk.token_type() {
+                    tt::Punctuation(pt::Semicolon) => {
+                        self.consume_token()?;
+                        ParseResult::none()
+                    }
+                    tt::Ident(_) => self.parse_connection(),
+                    tt::Punctuation(pt::LArrow | pt::RArrow) => self.parse_pindecl(),
+                    tt::Keyword(kt::Assert) => self.parse_assert(),
+                    tt::Keyword(kt::Const) => self.parse_const(),
+                    tt::Keyword(kt::If) => self.parse_if(&mut Self::parse_statement),
+                    tt::Keyword(kt::For) => todo!(),
+                    tt::Keyword(kt::With) => self.parse_with(),
+                    _ => {
+                        self.add_error(self.expected_error(
+                            &[
+                                keyword!(Assert),
+                                keyword!(Const),
+                                keyword!(For),
+                                keyword!(With),
+                                keyword!(If),
+                                punctuation!(LArrow),
+                                punctuation!(RArrow),
+                                ident!(),
+                            ],
+                            &tk,
+                        ));
+                        recover!()
+                    }
+                }
             },
             [punctuation!(Semicolon)]
         )?;
-
-        let end_token = self.assert_token_is(punctuation!(Semicolon));
 
         let Some(statement) = result else {
             return ParseResult::none();
         };
 
+        let end_pos = self
+            .consume_optional_semicolon()
+            .map_or(statement.pos(), |tk| tk.pos());
+
         let node = NodeBuilder::new(&statement);
-        ParseResult::some(node.statement(statement).build(&end_token))
+        ParseResult::some(node.statement(statement).build(&end_pos))
     }
 
     fn parse_pindecl(&mut self) -> ParseResult<Node> {
@@ -757,6 +749,8 @@ impl<'a> Parser<'a> {
         let Some(decls) = self.parse_decl_list()? else {
             return ParseResult::none();
         };
+
+        self.expect_next_token_is(punctuation!(Semicolon));
 
         ParseResult::some(node.pin_decls(direction, decls).build(&self.last_token_pos))
     }
@@ -894,61 +888,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_block_statement(&mut self) -> ParseResult<Node> {
-        let result = recover!(
-            self,
-            {
-                match self.peek_next_token()?.token_type() {
-                    tt::Keyword(kt::Assert) => self.parse_assert(),
-                    tt::Keyword(kt::Const) => self.parse_const(),
-                    tt::Keyword(kt::If) => self.parse_if(&mut Self::parse_statement),
-                    tt::Keyword(kt::For) => todo!(),
-                    tt::Keyword(kt::With) => self.parse_with(),
-                    _ => unreachable!(
-                        "parse_block_statement should only be called for block keywords"
-                    ),
-                }
-            },
-            [punctuation!(RCurly), punctuation!(Semicolon)]
-        )?;
-
-        let Some(statement) = result else {
-            return ParseResult::none();
-        };
-
-        let end_pos = self
-            .consume_optional_semicolon()
-            .map_or(statement.pos(), |tk| tk.pos());
-
-        let node = NodeBuilder::new(&statement);
-        ParseResult::some(node.statement(statement).build(&end_pos))
-    }
-
-    // fn parse_with(&mut self) -> Result<Option<StatementType>, CompilerError> {
-    //     self.assert_token_is(keyword!(With));
-
-    //     let base_expr = self.parse_pinexpr()?;
-    //     let mut exprs = Vec::new();
-
-    //     self.expect_token_is_else_consume(punctuation!(LCurly))?;
-
-    //     loop {
-    //         match self.peek_next_token()?.token_type() {
-    //             tt::Punctuation(pt::RCurly) => break,
-    //             _ => (),
-    //         };
-
-    //         let expr = match self.parse_pinexpr()? {
-    //             Some(expr) => expr,
-    //             None => continue,
-    //         };
-
-    //         exprs.push(expr);
-    //     }
-
-    //     Ok(base_expr.map(|base_expr| StatementType::with(base_expr, exprs)))
-    // }
-
     fn parse_type(&mut self) -> ParseResult<Node> {
         let name = self.parse_path()?;
         let start_pos = name.pos();
@@ -1025,6 +964,40 @@ impl<'a> Parser<'a> {
                 ParseResult::some(node.type_arg(None, value).build(&end_pos))
             }
         }
+    }
+
+    fn parse_connection(&mut self) -> ParseResult<Node> {
+        let tk = self.peek_next_token()?;
+        let node = NodeBuilder::new(&tk);
+
+        let lhs = recover!(
+            self,
+            {
+                let lhs = self.parse_pinexpr()?;
+                self.expect_next_token_one_of(&[punctuation!(LArrow), punctuation!(RArrow)])?;
+                ParseResult::some(lhs)
+            },
+            [punctuation!(LArrow), punctuation!(RArrow)]
+        )?;
+
+        let direction = match self.consume_token()?.token_type() {
+            tt::Punctuation(pt::LArrow) => ConnectionDirection::RightToLeft,
+            tt::Punctuation(pt::RArrow) => ConnectionDirection::LeftToRight,
+            // tt::Punctuation("<>") => ConnectionDirection::Bidirectional,
+            _ => unreachable!("parse_connection should only be called for LArrow or RArrow"),
+        };
+
+        let rhs = self.parse_pinexpr()?;
+        let end_pos = rhs.pos();
+
+        let Some(lhs) = lhs else {
+            return ParseResult::none();
+        };
+
+        // Not that great but should work
+        self.expect_next_token_is(punctuation!(Semicolon));
+
+        ParseResult::some(node.connection(lhs, direction, rhs).build(&end_pos))
     }
 
     fn parse_pinexpr(&mut self) -> AlwaysResult<Node> {
@@ -1162,7 +1135,7 @@ impl<'a> Parser<'a> {
                     let lhs = _build_pinexpr_node_from_stack(parser, stack)?;
                     let end_pos = rhs.pos();
                     Ok(NodeBuilder::new(&lhs)
-                        .pin_expr(Some(lhs), op, None, rhs)
+                        .pin_expr(Some(lhs), op, rhs)
                         .build(&end_pos))
                 }
                 Some(StackItem::Value(node)) => Ok(node),
@@ -1719,29 +1692,20 @@ impl NodeBuilder {
         })
     }
 
-    pub fn pin_expr(
-        self,
-        lhs: Option<Node>,
-        op: PinExprOpType,
-        range: Option<Node>,
-        rhs: Node,
-    ) -> Self {
+    pub fn pin_expr(self, lhs: Option<Node>, op: PinExprOpType, rhs: Node) -> Self {
         self.node_type(NodeType::PinExpr {
             lhs: lhs.map(Box::new),
             op,
-            range: range.map(Box::new),
             rhs: Box::new(rhs),
         })
     }
 
-    pub fn pin_expr_range_assign(
-        self,
-        op: PinExprOpType,
-        lhs: Node,
-        range: Node,
-        rhs: Node,
-    ) -> Self {
-        self.pin_expr(Some(lhs), op, Some(range), rhs)
+    pub fn connection(self, lhs: Node, direction: ConnectionDirection, rhs: Node) -> Self {
+        self.node_type(NodeType::Connection {
+            lhs: Box::new(lhs),
+            direction,
+            rhs: Box::new(rhs),
+        })
     }
 
     pub fn const_expr(self, lhs: Option<Node>, op: ConstExprOpType, rhs: Node) -> Self {

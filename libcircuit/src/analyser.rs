@@ -4,6 +4,7 @@ mod local;
 mod path_tag;
 mod scope;
 
+use builder::CircBuilder;
 use constexpr::{ConstType, ConstValue};
 // use local::{Local, LocalType, LocalValue};
 use path_tag::{PathTag, PathTagged};
@@ -11,8 +12,11 @@ use scope::{
     CircArg, CircSymbol, ConstSymbol, EnumSymbol, LocalSymbol, Scope, ScopeSymbol, ScopeSymbolType,
 };
 
+use crate::analyser::builder::EndpointBuilder;
 use crate::analyser::local::LocalType;
-use crate::ast::{ConstExprOpType, Node, NodeType, PinDirection, AST};
+use crate::ast::{
+    ConnectionDirection, ConstExprOpType, Node, NodeType, PinDirection, PinExprOpType, Range, AST,
+};
 use crate::diagnostics::diagnostic;
 use crate::loader::{Loader, Module, ModuleId};
 use crate::parser::Parser;
@@ -188,6 +192,7 @@ struct CircSignature {
 
 #[derive(Debug, Clone, Copy)]
 struct Pin {
+    name: IdentId,
     direction: PinDirection,
     width: usize,
 }
@@ -196,6 +201,18 @@ struct Pin {
 enum ConnectionRange {
     Single(usize),
     Range(Option<usize>, Option<usize>),
+}
+
+impl std::fmt::Display for ConnectionRange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Single(index) => write!(f, "{index}"),
+            Self::Range(None, None) => write!(f, ".."),
+            Self::Range(Some(start), None) => write!(f, "{start}.."),
+            Self::Range(None, Some(end)) => write!(f, "..{end}"),
+            Self::Range(Some(start), Some(end)) => write!(f, "{start}..{end}"),
+        }
+    }
 }
 
 impl ConnectionRange {
@@ -210,6 +227,7 @@ enum ConnectionEndpoint {
     },
     Dependency {
         dependency_id: usize,
+        pin_id: PinId,
         range: ConnectionRange,
     },
 }
@@ -234,35 +252,53 @@ struct Circ {
     connections: Rc<[Connection]>,
 }
 
-#[derive(Default)]
-struct CircBuilder {
-    dependencies: OrderedMap<IdentId, (CircId, Option<usize>)>,
-    pins: OrderedMap<IdentId, Pin>,
-    connections: Vec<Connection>,
-}
-
-impl CircBuilder {
-    fn connect_pin_to_pin(&mut self, source: PinId, dest: PinId, connection_type: ConnectionType) {
-        self.connections.push(Connection {
-            source: ConnectionEndpoint::Pin(source, ConnectionRange::FULL),
-            dest: ConnectionEndpoint::Pin(dest, ConnectionRange::FULL),
-            connection_type,
-        });
-    }
-
-    fn build(self) -> Circ {
-        Circ {
-            dependencies: Rc::from(self.dependencies.into_iter().collect::<Vec<_>>()),
-            pins: Rc::new(self.pins),
-            connections: Rc::from(&self.connections[..]),
-        }
-    }
-}
-
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
 enum PinOrArray {
     Pin,
     Array,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PinExprType {
+    Unknown,
+    Index(usize),
+    Range(Option<usize>, Option<usize>),
+    Pin {
+        pin_id: PinId,
+        pin: Pin,
+    },
+    PinRange {
+        pin_id: PinId,
+        pin: Pin,
+        start: Option<usize>,
+        end: Option<usize>,
+    },
+    DependencyArray {
+        name: IdentId,
+        circ_id: CircId,
+        len: usize,
+    },
+    Dependency {
+        name: IdentId,
+        circ_id: CircId,
+        index: Option<usize>,
+    },
+    DependencyPin {
+        name: IdentId,
+        circ_id: CircId,
+        index: Option<usize>,
+        pin_id: PinId,
+        pin: Pin,
+    },
+    DependencyPinRange {
+        name: IdentId,
+        circ_id: CircId,
+        index: Option<usize>,
+        pin_id: PinId,
+        pin: Pin,
+        start: Option<usize>,
+        end: Option<usize>,
+    },
 }
 
 #[derive(Debug)]
@@ -1439,6 +1475,7 @@ impl Analyser {
                     NodeType::If { .. } => self.evaluate_circ_if(ctx, circ, node)?,
                     NodeType::PinDecls { .. } => self.evaluate_pin_decls(ctx, circ, node)?,
                     NodeType::With(_) => self.evaluate_with(ctx, circ, node)?,
+                    NodeType::Connection { .. } => self.evaluate_connection(ctx, circ, node)?,
                     _ => unreachable!("parser bug - invalid statement node {node:#?}"),
                 },
                 _ => unreachable!("parser bug - node not allowed in circ item: {node:#?}"),
@@ -1554,24 +1591,45 @@ impl Analyser {
                 )
             });
 
+            let array_size = match width {
+                Some(ConstValue::Int(s)) if s > 0 => Some(s as usize),
+                Some(ConstValue::Int(s)) => {
+                    self.diagnostics.push(diagnostic!(
+                        Error,
+                        "array size must be at least 1",
+                        pos = decl.pos(),
+                        note = diagnostic!(
+                            Info,
+                            format!("size expression evaluated to {s}"),
+                            pos = count.as_ref().unwrap_or(name_node).pos(),
+                        )
+                    ));
+
+                    Some(if s == 0 { 1 } else { -s } as usize)
+                }
+                Some(ConstValue::Unknown) => {
+                    todo!("handle unknown width");
+                }
+                Some(_) => todo!("decl width must be an int"),
+                None => None,
+            };
+
             if already_exists {
                 continue;
             };
 
             ctx.scope.add_local(LocalSymbol {
                 name,
-                r#type: if let Some(width) = width {
-                    LocalType::Array(circ_id, width)
+                r#type: if let Some(array_size) = array_size {
+                    LocalType::Array(circ_id, array_size)
                 } else {
                     LocalType::Circ(circ_id)
                 },
                 pos: decl.pos(),
             });
 
-            circ.dependencies
+            circ.dependency(name, circ_id, array_size);
         }
-
-        // add decls to scope
 
         Ok(())
     }
@@ -1755,9 +1813,10 @@ impl Analyser {
                 pos: decl.pos(),
             });
 
-            circ.pins.insert(
+            circ.pin(
                 name_id,
                 Pin {
+                    name: name_id,
                     direction: *direction,
                     width: width as usize,
                 },
@@ -1765,6 +1824,634 @@ impl Analyser {
         }
 
         Ok(())
+    }
+
+    fn evaluate_connection(
+        &mut self,
+        ctx: &mut AnalyserContext,
+        circ: &mut CircBuilder,
+        node: &Node,
+    ) -> Result<(), Diagnostics> {
+        let (mut lhs, direction, mut rhs) = extract!(
+            node.node_type(),
+            NodeType::Connection {
+                lhs,
+                direction,
+                rhs
+            }
+        );
+
+        let connection = match direction {
+            ConnectionDirection::LeftToRight => circ.connection().unidirectional(),
+            ConnectionDirection::RightToLeft => {
+                std::mem::swap(&mut lhs, &mut rhs);
+                circ.connection().unidirectional()
+            }
+            ConnectionDirection::Bidrectional => circ.connection().bidirectional(),
+        };
+
+        let lhs = self.evaluate_pinexpr(ctx, circ, lhs)?;
+
+        let rhs = self.evaluate_pinexpr(ctx, circ, rhs)?;
+
+        Ok(())
+    }
+
+    fn resolve_pinexpr_ident(
+        &mut self,
+        ctx: &mut AnalyserContext,
+        circ: &mut CircBuilder,
+        name: IdentId,
+    ) -> Result<PinExprType, Diagnostics> {
+        if let Some((pin_id, pin)) = circ.get_pin(name) {
+            return Ok(PinExprType::Pin { pin_id, pin });
+        }
+
+        if let Some((circ_id, length)) = circ.get_dependency(name) {
+            if let Some(len) = length {
+                return Ok(PinExprType::DependencyArray { name, circ_id, len });
+            } else {
+                return Ok(PinExprType::Dependency {
+                    name,
+                    circ_id,
+                    index: None,
+                });
+            }
+        }
+
+        todo!("not valid in pinexpr diagnostic")
+    }
+
+    fn evaluate_pinexpr_range(
+        &mut self,
+        ctx: &mut AnalyserContext,
+        range: &Range,
+    ) -> Result<PinExprType, Diagnostics> {
+        match range {
+            Range::Index(expr) => {
+                let index = catch_errors!(
+                    self,
+                    self.evaluate_constexpr(ctx, &expr),
+                    ConstValue::Unknown
+                );
+
+                if index.is_unknown() {
+                    return Ok(PinExprType::Unknown);
+                };
+
+                match index {
+                    ConstValue::Int(x) if x > 0 => Ok(PinExprType::Index(x as usize)),
+                    ConstValue::Int(_) => todo!("invalid index diagnostic"),
+                    _ => todo!("invalid index type diagnostic"),
+                }
+            }
+            Range::Range(start, end, _) => {
+                let start_val = start.as_ref().map(|start| {
+                    catch_errors!(
+                        self,
+                        self.evaluate_constexpr(ctx, start),
+                        ConstValue::Unknown
+                    )
+                });
+
+                let start_val = match start_val {
+                    None => Some(None),
+                    Some(ConstValue::Int(x)) if x > 0 => Some(Some(x as usize)),
+                    Some(ConstValue::Int(_)) => todo!("invalid index diagnostic"),
+                    _ => todo!("invalid index type diagnostic"),
+                };
+
+                let end_val = end.as_ref().map(|end| {
+                    catch_errors!(self, self.evaluate_constexpr(ctx, end), ConstValue::Unknown)
+                });
+
+                let end_val = match end_val {
+                    None => Some(None),
+                    Some(ConstValue::Int(x)) if x > 0 => Some(Some(x as usize)),
+                    Some(ConstValue::Int(_)) => todo!("invalid index diagnostic"),
+                    _ => todo!("invalid index type diagnostic"),
+                };
+
+                match (start_val, end_val) {
+                    (Some(start), Some(end)) => Ok(PinExprType::Range(start, end)),
+                    _ => Ok(PinExprType::Unknown),
+                }
+            }
+        }
+    }
+
+    fn _pinexpr_bounds_check_index(&mut self, pos: Pos, lhs: PinExprType, index: usize) -> bool {
+        match lhs {
+            PinExprType::Pin { pin, .. } => {
+                if index >= pin.width {
+                    self.diagnostics.push(diagnostic!(
+                        Error,
+                        format!(
+                            "index {} out of bounds for pin '{}' of width {}",
+                            index,
+                            self.resolve_ident(pin.name),
+                            pin.width
+                        ),
+                        pos = pos,
+                    ));
+                    false
+                } else {
+                    true
+                }
+            }
+            PinExprType::PinRange {
+                pin, start, end, ..
+            } => {
+                let range_width = end.unwrap_or(pin.width) - start.unwrap_or(0);
+                if index >= range_width {
+                    self.diagnostics.push(diagnostic!(
+                        Error,
+                        format!(
+                            "index {} out of bounds for bit slice [{}] of pin '{}'",
+                            index,
+                            ConnectionRange::Range(start, end),
+                            self.resolve_ident(pin.name)
+                        ),
+                        pos = pos,
+                    ));
+                    false
+                } else {
+                    true
+                }
+            }
+            PinExprType::DependencyArray { name, len, .. } => {
+                if index >= len {
+                    self.diagnostics.push(diagnostic!(
+                        Error,
+                        format!(
+                            "index {} out of bounds for array '{}' of length {}",
+                            index,
+                            self.resolve_ident(name),
+                            len
+                        ),
+                        pos = pos,
+                    ));
+                    false
+                } else {
+                    true
+                }
+            }
+            PinExprType::DependencyPin {
+                name,
+                index: arr_index,
+                pin,
+                ..
+            } => {
+                if index >= pin.width {
+                    self.diagnostics.push(diagnostic!(
+                        Error,
+                        if let Some(arr_index) = arr_index {
+                            format!(
+                                "index {} out of bounds for pin '{}[{arr_index}].{}' of width {}",
+                                index,
+                                self.resolve_ident(name),
+                                self.resolve_ident(pin.name),
+                                pin.width
+                            )
+                        } else {
+                            format!(
+                                "index {} out of bounds for pin '{}.{}' of width {}",
+                                index,
+                                self.resolve_ident(name),
+                                self.resolve_ident(pin.name),
+                                pin.width
+                            )
+                        },
+                        pos = pos,
+                    ));
+                    false
+                } else {
+                    true
+                }
+            }
+            PinExprType::DependencyPinRange {
+                name,
+                index: arr_index,
+                pin,
+                start,
+                end,
+                ..
+            } => {
+                let range_width = end.unwrap_or(pin.width) - start.unwrap_or(0);
+                if index >= range_width {
+                    self.diagnostics.push(diagnostic!(
+                        Error,
+                        if let Some(arr_index) = arr_index {
+                            format!(
+                                "index {} out of bounds for bit slice [{}] of pin '{}[{arr_index}].{}'",
+                                index, ConnectionRange::Range(start, end), self.resolve_ident(name), self.resolve_ident(pin.name)
+                            )
+                        } else {
+                            format!(
+                                "index {} out of bounds for bit slice [{}] of pin '{}.{}'",
+                                index, ConnectionRange::Range(start, end), self.resolve_ident(name), self.resolve_ident(pin.name)
+                            )
+                        },
+                        pos = pos,
+                    ));
+                    false
+                } else {
+                    true
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn _pinexpr_range_in_bounds(
+        s_start: usize,
+        s_end: usize,
+        t_start: Option<usize>,
+        t_end: Option<usize>,
+    ) -> bool {
+        // check if the target range (t_start, t_end) fits inside of the source range (s_start, s_end)
+        let t_start = t_start.unwrap_or(0);
+        let t_end = t_end.unwrap_or(s_end);
+        if t_start >= s_start && t_end < s_end {
+            true
+        } else {
+            false
+        }
+    }
+
+    fn _pinexpr_bounds_check_range(
+        &mut self,
+        pos: Pos,
+        lhs: PinExprType,
+        start: Option<usize>,
+        end: Option<usize>,
+    ) -> bool {
+        let range = ConnectionRange::Range(start, end);
+
+        match lhs {
+            PinExprType::Pin { pin, .. } => {
+                let range_width = end.unwrap_or(pin.width) - start.unwrap_or(0) - 1;
+                if range_width >= pin.width {
+                    self.diagnostics.push(diagnostic!(
+                        Error,
+                        format!(
+                            "range {} out of bounds for pin '{}' of width {}",
+                            range,
+                            self.resolve_ident(pin.name),
+                            pin.width
+                        ),
+                        pos = pos,
+                    ));
+                    false
+                } else {
+                    true
+                }
+            }
+            PinExprType::PinRange {
+                pin,
+                start: sl_start,
+                end: sl_end,
+                ..
+            } => {
+                if Self::_pinexpr_range_in_bounds(
+                    sl_start.unwrap_or(0),
+                    sl_end.unwrap_or(pin.width),
+                    start,
+                    end,
+                ) {
+                    self.diagnostics.push(diagnostic!(
+                        Error,
+                        format!(
+                            "range {} out of bounds for bit slice [{}] of pin '{}'",
+                            range,
+                            ConnectionRange::Range(start, end),
+                            self.resolve_ident(pin.name)
+                        ),
+                        pos = pos,
+                    ));
+                    false
+                } else {
+                    true
+                }
+            }
+            PinExprType::DependencyPin {
+                name,
+                index: arr_index,
+                pin,
+                ..
+            } => {
+                let range_width = end.unwrap_or(pin.width) - start.unwrap_or(0) - 1;
+                if range_width >= pin.width {
+                    self.diagnostics.push(diagnostic!(
+                        Error,
+                        if let Some(arr_index) = arr_index {
+                            format!(
+                                "range {} out of bounds for pin '{}[{arr_index}].{}' of width {}",
+                                range,
+                                self.resolve_ident(name),
+                                self.resolve_ident(pin.name),
+                                pin.width
+                            )
+                        } else {
+                            format!(
+                                "range {} out of bounds for pin '{}.{}' of width {}",
+                                range,
+                                self.resolve_ident(name),
+                                self.resolve_ident(pin.name),
+                                pin.width
+                            )
+                        },
+                        pos = pos,
+                    ));
+                    false
+                } else {
+                    true
+                }
+            }
+            PinExprType::DependencyPinRange {
+                name,
+                index: arr_index,
+                pin,
+                start: sl_start,
+                end: sl_end,
+                ..
+            } => {
+                if Self::_pinexpr_range_in_bounds(
+                    sl_start.unwrap_or(0),
+                    sl_end.unwrap_or(pin.width),
+                    start,
+                    end,
+                ) {
+                    self.diagnostics.push(diagnostic!(
+                        Error,
+                        if let Some(arr_index) = arr_index {
+                            format!(
+                                "range {} out of bounds for bit slice [{}] of pin '{}[{arr_index}].{}'",
+                                range, ConnectionRange::Range(start, end), self.resolve_ident(name), self.resolve_ident(pin.name)
+                            )
+                        } else {
+                            format!(
+                                "range {} out of bounds for bit slice [{}] of pin '{}.{}'",
+                                range, ConnectionRange::Range(start, end), self.resolve_ident(name), self.resolve_ident(pin.name)
+                            )
+                        },
+                        pos = pos,
+                    ));
+                    false
+                } else {
+                    true
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn pinexpr_bounds_check(&mut self, pos: Pos, lhs: PinExprType, rhs: PinExprType) -> bool {
+        match rhs {
+            PinExprType::Index(index) => self._pinexpr_bounds_check_index(pos, lhs, index),
+            PinExprType::Range(start, end) => {
+                self._pinexpr_bounds_check_range(pos, lhs, start, end)
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn evaluate_pinexpr(
+        &mut self,
+        ctx: &mut AnalyserContext,
+        circ: &mut CircBuilder,
+        node: &Node,
+    ) -> Result<PinExprType, Diagnostics> {
+        let pos = node.pos();
+
+        let (lhs, op, rhs) = match node.node_type() {
+            NodeType::PinExpr { lhs, op, rhs } => (lhs, op, rhs),
+            NodeType::Identifier(name) => return self.resolve_pinexpr_ident(ctx, circ, *name),
+            NodeType::Range(range) => return self.evaluate_pinexpr_range(ctx, range),
+            _ => unreachable!("parser bug"),
+        };
+
+        let lhs = lhs.as_ref().map(|node| {
+            catch_errors!(
+                self,
+                self.evaluate_pinexpr(ctx, circ, node),
+                PinExprType::Unknown
+            )
+        });
+
+        // let result = match (lhs, rhs) {
+        //     (Some(lhs @ PinExprType::DepedencyArray { name, circ_id, len }), rhs @ PinExprType::Index(index)) => match op {
+        //         PinExprOpType::Index => PinExprType::Dependency {
+        //             name,
+        //             circ_id,
+        //             index,
+        //         },
+        //         _ => todo!("invalid op between ...")
+        //     },
+        //     (Some(lhs @))
+
+        let result = match op {
+            PinExprOpType::GetChild => {
+                let Some(lhs) = lhs else {
+                    unreachable!("parser bug: lhs is None for get child operation");
+                };
+
+                let pin_name = match rhs.node_type() {
+                    NodeType::Identifier(name) => *name,
+                    _ => {
+                        self.diagnostics.push(diagnostic!(
+                            Error,
+                            "get child operation requires an identifier on the right-hand side",
+                            pos = rhs.pos(),
+                        ));
+                        return Ok(PinExprType::Unknown);
+                    }
+                };
+
+                let PinExprType::Dependency {
+                    name,
+                    circ_id,
+                    index,
+                } = lhs
+                else {
+                    todo!("invalid lhs in get child operation: {lhs:#?}");
+                };
+
+                let circ = self
+                    .circs
+                    .get_by_index(circ_id)
+                    .unwrap_or_else(|| unreachable!("invalid circ id: {circ_id}"));
+
+                let pin_id = match circ.pins.get_index(&pin_name) {
+                    Some(pin_id) => pin_id,
+                    None => todo!("invalid pin diagnostic"),
+                };
+
+                let Some(&pin) = circ.pins.get(&pin_name) else {
+                    unreachable!("pin id {pin_id} not found in pins for circ {circ:#?}");
+                };
+
+                PinExprType::DependencyPin {
+                    name,
+                    circ_id,
+                    index,
+                    pin_id,
+                    pin,
+                }
+            }
+            PinExprOpType::Index => {
+                let Some(lhs) = lhs else {
+                    unreachable!("parser bug: lhs is None for index operation");
+                };
+
+                let rhs = catch_errors!(
+                    self,
+                    self.evaluate_pinexpr(ctx, circ, rhs),
+                    PinExprType::Unknown
+                );
+
+                if !self.pinexpr_bounds_check(pos, lhs, rhs) {
+                    return Ok(PinExprType::Unknown);
+                }
+
+                // TODO: optimise this
+                match (lhs, rhs) {
+                    (
+                        PinExprType::DependencyArray { name, circ_id, len },
+                        PinExprType::Index(idx),
+                    ) => PinExprType::Dependency {
+                        name,
+                        circ_id,
+                        index: Some(idx),
+                    },
+                    (PinExprType::Pin { pin_id, pin }, PinExprType::Index(idx)) => {
+                        PinExprType::PinRange {
+                            pin_id,
+                            pin,
+                            start: Some(idx),
+                            end: Some(idx + 1),
+                        }
+                    }
+                    (
+                        PinExprType::PinRange {
+                            pin_id,
+                            pin,
+                            start,
+                            end,
+                        },
+                        PinExprType::Index(idx),
+                    ) => PinExprType::PinRange {
+                        pin_id,
+                        pin,
+                        start: Some(start.unwrap_or(0) + idx),
+                        end: Some(start.unwrap_or(0) + idx + 1),
+                    },
+                    (
+                        PinExprType::DependencyPin {
+                            name,
+                            circ_id,
+                            index,
+                            pin_id,
+                            pin,
+                        },
+                        PinExprType::Index(idx),
+                    ) => PinExprType::DependencyPinRange {
+                        name,
+                        circ_id,
+                        index,
+                        pin_id,
+                        pin,
+                        start: Some(idx),
+                        end: Some(idx + 1),
+                    },
+                    (
+                        PinExprType::DependencyPinRange {
+                            name,
+                            circ_id,
+                            index,
+                            pin_id,
+                            pin,
+                            start,
+                            end,
+                        },
+                        PinExprType::Index(idx),
+                    ) => PinExprType::DependencyPinRange {
+                        name,
+                        circ_id,
+                        index,
+                        pin_id,
+                        pin,
+                        start: Some(start.unwrap_or(0) + idx),
+                        end: Some(start.unwrap_or(0) + idx + 1),
+                    },
+                    // RANGE INDEXES
+                    (PinExprType::Pin { pin_id, pin }, PinExprType::Range(s, e)) => {
+                        PinExprType::PinRange {
+                            pin_id,
+                            pin,
+                            start: Some(s.unwrap_or(0)),
+                            end: Some(e.unwrap_or(pin.width)),
+                        }
+                    }
+                    (
+                        PinExprType::PinRange {
+                            pin_id,
+                            pin,
+                            start,
+                            end,
+                        },
+                        PinExprType::Range(s, e),
+                    ) => PinExprType::PinRange {
+                        pin_id,
+                        pin,
+                        start: Some(start.unwrap_or(0) + s.unwrap_or(0)),
+                        end: Some(start.unwrap_or(0) + e.unwrap_or(pin.width)),
+                    },
+                    (
+                        PinExprType::DependencyPin {
+                            name,
+                            circ_id,
+                            index,
+                            pin_id,
+                            pin,
+                        },
+                        PinExprType::Range(s, e),
+                    ) => PinExprType::DependencyPinRange {
+                        name,
+                        circ_id,
+                        index,
+                        pin_id,
+                        pin,
+                        start: Some(s.unwrap_or(0)),
+                        end: Some(e.unwrap_or(pin.width)),
+                    },
+                    (
+                        PinExprType::DependencyPinRange {
+                            name,
+                            circ_id,
+                            index,
+                            pin_id,
+                            pin,
+                            start,
+                            end,
+                        },
+                        PinExprType::Range(s, e),
+                    ) => PinExprType::DependencyPinRange {
+                        name,
+                        circ_id,
+                        index,
+                        pin_id,
+                        pin,
+                        start: Some(start.unwrap_or(0) + s.unwrap_or(0)),
+                        end: Some(start.unwrap_or(0) + e.unwrap_or(pin.width)),
+                    },
+                    (PinExprType::Unknown, _) | (_, PinExprType::Unknown) => PinExprType::Unknown,
+                    _ => todo!("cannot index lhs"),
+                }
+            }
+        };
+
+        Ok(result)
     }
 }
 

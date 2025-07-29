@@ -66,6 +66,13 @@ pub enum PinDirection {
     Transput,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionDirection {
+    LeftToRight,
+    RightToLeft,
+    Bidrectional,
+}
+
 #[derive(Debug)]
 pub struct Decl {
     name: Node,
@@ -321,8 +328,6 @@ macro_rules! pin_expr_ops {
 pin_expr_ops! {
     Index(1, Left, LSquare),
     GetChild(1, Left, Period),
-    RTLAssign(0, Left, LArrow),
-    LTRAssign(0, Left, RArrow),
 }
 
 #[derive(Debug)]
@@ -346,6 +351,11 @@ pub enum NodeType {
         name: Box<Node>,
         default: Option<Box<Node>>,
     },
+    Connection {
+        lhs: Box<Node>,
+        direction: ConnectionDirection,
+        rhs: Box<Node>,
+    },
     Enum {
         name: Box<Node>,
         variants: Vec<Node>,
@@ -363,7 +373,6 @@ pub enum NodeType {
     PinExpr {
         lhs: Option<Box<Node>>,
         op: PinExprOpType,
-        range: Option<Box<Node>>,
         rhs: Box<Node>,
     },
     ConstExpr {
