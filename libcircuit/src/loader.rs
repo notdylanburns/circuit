@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use crate::diagnostics::{diagnostic, Diagnostic};
-use crate::util::{Interner, Pos, Position};
+use crate::util::{Interner, Pos};
 
 pub type ModuleId = usize;
 
@@ -259,7 +259,6 @@ impl Loader {
         });
 
         let search_paths = Self::get_search_paths(module_name, module_root);
-        dbg!(&search_paths);
         for path in search_paths.iter() {
             let module_path = match path.join(name).with_extension("ckt").canonicalize() {
                 Ok(path) => path,

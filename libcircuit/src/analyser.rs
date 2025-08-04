@@ -1,24 +1,18 @@
 mod builder;
 mod constexpr;
 mod local;
-mod path_tag;
 mod scope;
 
-use builder::CircBuilder;
+use builder::{CannotConnectReason, CircBuilder, ConnectionBuilder};
 use constexpr::{ConstType, ConstValue};
-// use local::{Local, LocalType, LocalValue};
-use path_tag::{PathTag, PathTagged};
-use scope::{
-    CircArg, CircSymbol, ConstSymbol, EnumSymbol, LocalSymbol, Scope, ScopeSymbol, ScopeSymbolType,
-};
+use scope::{CircArg, CircSymbol, ConstSymbol, EnumSymbol, LocalSymbol, Scope, ScopeSymbol};
 
-use crate::analyser::builder::EndpointBuilder;
 use crate::analyser::local::LocalType;
 use crate::ast::{
-    ConnectionDirection, ConstExprOpType, Node, NodeType, PinDirection, PinExprOpType, Range, AST,
+    ConnectionDirection, ConstExprOpType, Node, NodeType, PinDirection, PinExprOpType, AST,
 };
 use crate::diagnostics::diagnostic;
-use crate::loader::{Loader, Module, ModuleId};
+use crate::loader::{Loader, ModuleId};
 use crate::parser::Parser;
 use crate::tokeniser::{IdentId, Tokeniser};
 use crate::util::{extract, Interner};
@@ -27,50 +21,6 @@ use crate::util::{OrderedMap, Pos, Position};
 use crate::{Diagnostic, Diagnostics};
 use std::collections::HashMap;
 use std::rc::Rc;
-
-// macro_rules! extract_node {
-//     ($node:expr, $variant:ident { $field:ident $(,$fields:ident)* }) => {
-//         match $node.node_type() {
-//             NodeType::$variant { $field $(,$fields)* , ..} => ($field, $($fields),*),
-//             _ => unreachable!("parser bug"),
-//         }
-//     };
-//     ($node:expr, $variant:ident ( $field:ident $(,$fields:ident)* )) => {
-//         match $node.node_type() {
-//             NodeType::$variant ( $field $(,$fields)* , ..) => ($field, $($fields),*),
-//             _ => unreachable!("parser bug"),
-//         }
-//     };
-// }
-
-// macro_rules! return_or_error {
-//     ($value:expr, $errors:expr) => {
-//         if $errors.is_empty() {
-//             Ok($value)
-//         } else {
-//             Err($errors)
-//         }
-//     };
-// }
-
-// macro_rules! add_error {
-//     ($errors:expr, $ident:ident $(($($arg:expr),+))?) => {
-//         $errors.push(CompilerError::new(AnalyserError::$ident $(($($arg),+))?));
-//     };
-//     ($errors:expr, $ident:ident $(($($arg:expr),+))?, $pos:expr) => {
-//         $errors.push(CompilerError::new(AnalyserError::$ident $(($($arg),+))?).with_pos($pos));
-//     };
-// }
-
-// macro_rules! new_error {
-//     ($ident:ident $(($($arg:expr),+))?) => {
-//         vec![CompilerError::new(AnalyserError::$ident $(($($arg),+))?)]
-//     };
-//     ($ident:ident $(($($arg:expr),+))?, $pos:expr) => {
-//         vec![CompilerError::new(AnalyserError::$ident $(($($arg),+))?).with_pos($pos)]
-//     };
-
-// }
 
 macro_rules! catch_error {
     ($self:expr, $expr:expr, $default:expr) => {
@@ -96,92 +46,8 @@ macro_rules! catch_errors {
     };
 }
 
-// #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-// enum PinDirection {
-//     Input,
-//     Output,
-// }
-
-// impl TryFrom<&str> for PinDirection {
-//     type Error = ();
-
-//     fn try_from(value: &str) -> Result<Self, Self::Error> {
-//         match value {
-//             "Input" => Ok(Self::Input),
-//             "Output" => Ok(Self::Output),
-//             _ => Err(()),
-//         }
-//     }
-// }
-
-// #[derive(Debug)]
-// struct CircPin<'i> {
-//     r#type: LocalType,
-//     node: &'i Node<'i>,
-// }
-
-// #[derive(Debug)]
-// struct CircInterface<'i> {
-//     named_pins: HashMap<&'i str, CircPin<'i>>,
-//     anonymous_pins: Vec<CircPin<'i>>,
-// }
-
-// impl<'i> CircInterface<'i> {
-//     fn get_named_pin(&self, name: &'i str) -> Option<&CircPin<'i>> {
-//         self.named_pins.get(name)
-//     }
-
-//     fn get_anonymous_pin(&self, index: &mut usize) -> Option<&CircPin<'i>> {
-//         if *index < self.anonymous_pins.len() {
-//             let pin = &self.anonymous_pins[*index];
-//             *index += 1;
-//             Some(pin)
-//         } else {
-//             None
-//         }
-//     }
-// }
-
-// #[derive(Debug)]
-// enum ConnectionPinSource<'i> {
-//     This,
-//     Local(&'i str, usize),
-// }
-
-// #[derive(Debug)]
-// enum ConnectionEndpointType {
-//     Input,
-//     Output,
-//     Circ,
-// }
-
-// #[derive(Debug)]
-// struct ConnectionEndpoint<'i> {
-//     source: ConnectionPinSource<'i>,
-//     r#type: ConnectionEndpointType,
-//     name: &'i str,
-//     start: usize,
-//     end: usize,
-// }
-
-// impl<'i> ConnectionEndpoint<'i> {
-//     const fn width(&self) -> usize {
-//         self.end - self.start + 1
-//     }
-// }
-
-// #[derive(Debug)]
-// struct CircDescriptor<'i> {
-//     interface: CircInterface<'i>,
-//     scope: Scope<'i>,
-//     connections: Vec<(ConnectionEndpoint<'i>, ConnectionEndpoint<'i>)>,
-//     node: &'i Node<'i>,
-// }
-
-// impl<'i> CircDescriptor<'i> {}
-
-type CircId = usize;
-type PinId = usize;
+pub type CircId = usize;
+pub type PinId = usize;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct CircSignature {
@@ -191,36 +57,33 @@ struct CircSignature {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct Pin {
-    name: IdentId,
-    direction: PinDirection,
-    width: usize,
+pub struct Pin {
+    pub name: IdentId,
+    pub direction: PinDirection,
+    pub width: usize,
 }
 
-#[derive(Debug, Clone, Copy)]
-enum ConnectionRange {
-    Single(usize),
-    Range(Option<usize>, Option<usize>),
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ConnectionRange {
+    pub start: usize,
+    pub end: usize,
 }
 
-impl std::fmt::Display for ConnectionRange {
+struct RangeDisplay(Option<usize>, Option<usize>);
+
+impl std::fmt::Display for RangeDisplay {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Single(index) => write!(f, "{index}"),
-            Self::Range(None, None) => write!(f, ".."),
-            Self::Range(Some(start), None) => write!(f, "{start}.."),
-            Self::Range(None, Some(end)) => write!(f, "..{end}"),
-            Self::Range(Some(start), Some(end)) => write!(f, "{start}..{end}"),
+        match (self.0, self.1) {
+            (None, None) => write!(f, ".."),
+            (Some(start), None) => write!(f, "{start}.."),
+            (None, Some(end)) => write!(f, "..{end}"),
+            (Some(start), Some(end)) => write!(f, "{start}..{end}"),
         }
     }
 }
 
-impl ConnectionRange {
-    const FULL: Self = Self::Range(None, None);
-}
-
-#[derive(Debug, Clone, Copy)]
-enum ConnectionEndpoint {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ConnectionEndpoint {
     Pin {
         pin_id: PinId,
         range: ConnectionRange,
@@ -232,30 +95,25 @@ enum ConnectionEndpoint {
     },
 }
 
-#[derive(Debug, Clone, Copy)]
-enum ConnectionType {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ConnectionType {
     Unidirectional,
     Bidirectional,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct Connection {
-    source: ConnectionEndpoint,
-    dest: ConnectionEndpoint,
-    connection_type: ConnectionType,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Connection {
+    pub width: usize,
+    pub source: ConnectionEndpoint,
+    pub dest: ConnectionEndpoint,
+    pub connection_type: ConnectionType,
 }
 
 #[derive(Debug, Clone)]
-struct Circ {
-    dependencies: Rc<[CircId]>,
-    pins: Rc<OrderedMap<IdentId, Pin>>,
-    connections: Rc<[Connection]>,
-}
-
-#[derive(Debug, PartialEq, Eq, Copy, Clone)]
-enum PinOrArray {
-    Pin,
-    Array,
+pub struct Circ {
+    pub dependencies: Rc<[CircId]>,
+    pub pins: Rc<OrderedMap<IdentId, Pin>>,
+    pub connections: Rc<[Connection]>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -301,34 +159,73 @@ enum PinExprType {
     },
 }
 
-#[derive(Debug)]
-pub enum AnalyserError {
-    DuplicateArgument(String, String, Pos),
-    DuplicateSymbol(String, Pos),
-    DuplicateVariant(String, String, Pos),
-    UnknownType(String),
-    UnknownIdentifier(String),
-    InvalidConstantType(String),
-    InvalidBinaryOp(String, String, String),
-    InvalidUnaryOp(String, String),
-    MismatchedTypes(String, String),
-    ArgDefaultTypeMismatch(String, String, Pos),
-    AssertionFailed(Option<String>),
-    PinWithTypeArgs,
-    UnknownCirc(String),
-    TooManyArgs(usize, usize),
-    PositionalArgAfterNamedArg(Pos),
-    UnknownArgument(String),
-    MissingRequiredArg(String),
-    DuplicatePin(String, Pos),
-    InvalidSize(PinOrArray, isize),
-    InvalidSizeType(PinOrArray, String),
-    InvalidIndex(isize),
-    InvalidIndexType(String),
-    InvalidConstIdentifier(String),
-    DeclConstType(String),
-    UnknownEnumVariant(String, String),
+impl PinExprType {
+    fn is_unknown(&self) -> bool {
+        matches!(self, Self::Unknown)
+    }
+
+    fn is_valid_endpoint(&self) -> bool {
+        // match self {
+        //     Self::Unknown
+        //     | Self::Index(_)
+        //     | Self::Range(_, _)
+        //     | Self::DependencyArray { .. }
+        //     | Self::Dependency { .. } => false,
+        //     _ => true,
+        // }
+        self.get_pin().is_some()
+    }
+
+    fn get_pin(&self) -> Option<Pin> {
+        match self {
+            Self::Unknown
+            | Self::Index(_)
+            | Self::Range(_, _)
+            | Self::DependencyArray { .. }
+            | Self::Dependency { .. } => None,
+            Self::Pin { pin, .. } => Some(*pin),
+            Self::PinRange { pin, .. } => Some(*pin),
+            Self::DependencyPin { pin, .. } => Some(*pin),
+            Self::DependencyPinRange { pin, .. } => Some(*pin),
+        }
+    }
+
+    fn is_dependency_pin(&self) -> bool {
+        matches!(
+            self,
+            Self::DependencyPin { .. } | Self::DependencyPinRange { .. }
+        )
+    }
+
+    fn width(&self) -> usize {
+        let Some(pin) = self.get_pin() else {
+            unreachable!("cannot get width of {self:#?}");
+        };
+
+        let range = match self {
+            Self::PinRange { start, end, .. } => Some((start, end)),
+            Self::DependencyPinRange { start, end, .. } => Some((start, end)),
+            _ => None,
+        };
+
+        if let Some((start, end)) = range {
+            end.unwrap_or(pin.width) - start.unwrap_or(0)
+        } else {
+            pin.width
+        }
+    }
+
+    fn direction(&self) -> PinDirection {
+        let Some(pin) = self.get_pin() else {
+            unreachable!("cannot get width of {self:#?}");
+        };
+
+        pin.direction
+    }
 }
+
+#[derive(Debug)]
+struct AnalyserError;
 
 impl AnalyserError {
     fn invalid_unary_op(op: &str, rhs_type: &str) -> String {
@@ -338,80 +235,21 @@ impl AnalyserError {
     fn invalid_binary_op(op: &str, lhs_type: &str, rhs_type: &str) -> String {
         format!("cannot perform operation '{op}' between types '{lhs_type}' and '{rhs_type}'")
     }
-}
 
-// impl std::fmt::Display for AnalyserError {
-//     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-//         match self {
-//             Self::DuplicateArgument(circ_name, arg_name, first_defined) => write!(
-//                 f,
-//                 "argument '{arg_name}' already defined for circuit '{circ_name}' (first definition at line {}, col {})",
-//                 first_defined.line(),
-//                 first_defined.col(),
-//             ),
-//             Self::DuplicateSymbol(symbol, first_defined) => write!(
-//                 f,
-//                 "symbol '{symbol}' already defined (first definition at line {}, col {})",
-//                 first_defined.line(),
-//                 first_defined.col(),
-//             ),
-//             Self::DuplicateVariant(enum_name, variant_name, first_defined) => write!(
-//                 f,
-//                 "variant '{variant_name}' already defined in enum '{enum_name}' (first definition at line {}, col {})",
-//                 first_defined.line(),
-//                 first_defined.col(),
-//             ),
-//             Self::UnknownType(name) => write!(f, "unknown type: '{name}'"),
-//             Self::UnknownIdentifier(name) => write!(f, "unknown identifier: '{name}'"),
-//             Self::InvalidConstantType(type_name) => write!(f, "cannot create a constant of type {type_name}, you may want to use decl inside a circuit instead"),
-//             Self::InvalidBinaryOp(op, lhs_type, rhs_type) => write!(
-//                 f,
-//                 "cannot perform operation '{op}' on types '{lhs_type}' and '{rhs_type}'",
-//             ),
-//             Self::InvalidUnaryOp(op, operand_type) => write!(
-//                 f,
-//                 "cannot perform operation '{op}' on type '{operand_type}'",
-//             ),
-//             Self::MismatchedTypes(expected, got) => {
-//                 write!(f, "mismatched types, expected: {expected}, got: {got}")
-//             }
-//             Self::ArgDefaultTypeMismatch(expected, got, arg_type_defined_at) => write!(
-//                 f,
-//                 "default value of type '{got}' does not match argument type '{expected}' (argument type defined at line {}, col {})",
-//                 arg_type_defined_at.line(),
-//                 arg_type_defined_at.col(),
-//             ),
-//             Self::AssertionFailed(Some(message)) => write!(f, "assertion failed: {message}"),
-//             Self::AssertionFailed(None) => write!(f, "assertion failed"),
-//             Self::PinWithTypeArgs => write!(f, "pins cannot have type arguments"),
-//             Self::UnknownCirc(name) => write!(f, "unknown circuit: '{name}'"),
-//             Self::TooManyArgs(expected, got) => write!(f, "too many arguments (expected {expected}, got {got})"),
-//             Self::PositionalArgAfterNamedArg(pos) => write!(
-//                 f,
-//                 "positional argument after named argument (last named argument specified at line {}, col {})",
-//                 pos.line(),
-//                 pos.col()
-//             ),
-//             Self::UnknownArgument(name) => write!(f, "unknown argument: {name}"),
-//             Self::MissingRequiredArg(name) => write!(f, "required argument {name} not specified"),
-//             Self::DuplicatePin(name, first_defined) => write!(
-//                 f,
-//                 "pin {name} already defined (first definition at line {}, col {})",
-//                 first_defined.line(),
-//                 first_defined.col(),
-//             ),
-//             Self::InvalidSize(PinOrArray::Pin, value) => write!(f, "invalid pin width: {value}"),
-//             Self::InvalidSize(PinOrArray::Array, value) => write!(f, "invalid array length: {value}"),
-//             Self::InvalidSizeType(PinOrArray::Pin, name) => write!(f, "pin width must be an integer (got {name})"),
-//             Self::InvalidSizeType(PinOrArray::Array, name) => write!(f, "array length must be an integer (got {name})"),
-//             Self::InvalidIndex(value) => write!(f, "invalid index: {value}"),
-//             Self::InvalidIndexType(name) => write!(f, "indices must be integers (got {name})"),
-//             Self::InvalidConstIdentifier(name) => write!(f, "{name} is not known at compile time"),
-//             Self::DeclConstType(name) => write!(f, "cannot use decl with type {name}, use const instead"),
-//             Self::UnknownEnumVariant(enum_name, variant) => write!(f, "no variant '{variant}' on enum '{enum_name}'")
-//         }
-//     }
-// }
+    fn invalid_range_type(t: &str) -> String {
+        format!("cannot create a range of a non-integer type '{t}'")
+    }
+
+    fn invalid_range_types(lhs_type: &str, rhs_type: &str) -> String {
+        if lhs_type == "int" {
+            format!("invalid type '{rhs_type}' in right hand side of range")
+        } else if rhs_type == "int" {
+            format!("invalid type '{lhs_type}' in left hand side of range")
+        } else {
+            format!("cannot create a range between non-integer types '{lhs_type}' and '{rhs_type}'")
+        }
+    }
+}
 
 pub enum BuildConst {
     Bool(bool),
@@ -428,8 +266,17 @@ impl Into<ConstValue> for BuildConst {
 }
 
 #[derive(Debug)]
-pub struct AnalyserResult {
-    diagnostics: Diagnostics,
+pub enum AnalyserResult {
+    Success {
+        diagnostics: Diagnostics,
+        main: CircId,
+        circs: Vec<Circ>,
+        loader: Loader,
+    },
+    Error {
+        diagnostics: Diagnostics,
+        loader: Loader,
+    },
 }
 
 struct AnalyserContext {
@@ -464,21 +311,39 @@ impl Analyser {
         }
     }
 
-    pub fn analyse(mut self) -> Result<AnalyserResult, Diagnostics> {
-        self.process_module(Loader::ROOT_MODULE);
+    pub fn analyse(mut self) -> AnalyserResult {
+        match self.process_module(Loader::ROOT_MODULE) {
+            Ok(_) => (),
+            Err(ds) => self.diagnostics.append(ds),
+        }
 
         if self.diagnostics.has_errors() {
-            return Err(self.diagnostics);
+            return AnalyserResult::Error {
+                diagnostics: self.diagnostics,
+                loader: self.loader,
+            };
         };
 
-        self.type_check_circs()?;
+        let main = match self.type_check_circs() {
+            Ok(main_circ_id) => Some(main_circ_id),
+            Err(ds) => {
+                self.diagnostics.append(ds);
+                None
+            }
+        };
 
         if self.diagnostics.has_errors() {
-            Err(self.diagnostics)
-        } else {
-            Ok(AnalyserResult {
+            AnalyserResult::Error {
                 diagnostics: self.diagnostics,
-            })
+                loader: self.loader,
+            }
+        } else {
+            AnalyserResult::Success {
+                diagnostics: self.diagnostics,
+                main: main.unwrap(),
+                circs: self.circs.into_values(),
+                loader: self.loader,
+            }
         }
     }
 
@@ -513,6 +378,7 @@ impl Analyser {
         };
 
         self.import_stack.push(module_id);
+        dbg!(&ast);
         self.evaluate_items(&mut ctx, ast.into_iter())?;
         self.import_stack.pop();
 
@@ -975,7 +841,12 @@ impl Analyser {
         let already_defined = self.check_symbol_exists(ctx, name_id, pos);
 
         if !already_defined {
-            self.import_module(&name, ctx.module_id)?;
+            match self.import_module(&name, ctx.module_id) {
+                Ok(_) => (),
+                Err(ds) => self
+                    .diagnostics
+                    .append(ds.into_iter().map(|d| d.with_pos(pos))),
+            }
         }
 
         Ok(())
@@ -1029,14 +900,16 @@ impl Analyser {
             )
         });
 
-        let rhs = catch_errors!(
-            self,
-            self.evaluate_constexpr(ctx, &rhs),
-            ConstValue::Unknown
-        );
+        let rhs = rhs.as_ref().map(|node| {
+            catch_errors!(
+                self,
+                self.evaluate_constexpr(ctx, node),
+                ConstValue::Unknown
+            )
+        });
 
         let result = match (lhs, rhs) {
-            (Some(lhs @ ConstValue::Int(x)), rhs @ ConstValue::Int(y)) => match op {
+            (Some(lhs @ ConstValue::Int(x)), Some(rhs @ ConstValue::Int(y))) => match op {
                 ConstExprOpType::Add => ConstValue::Int(x + y),
                 ConstExprOpType::Sub => ConstValue::Int(x - y),
                 ConstExprOpType::Mul => ConstValue::Int(x * y),
@@ -1053,7 +926,7 @@ impl Analyser {
                 ConstExprOpType::Lte => ConstValue::Bool(x <= y),
                 ConstExprOpType::Gt => ConstValue::Bool(x > y),
                 ConstExprOpType::Gte => ConstValue::Bool(x >= y),
-                ConstExprOpType::Range => ConstValue::Range(x, y),
+                ConstExprOpType::Range => ConstValue::Range(Some(x), Some(y)),
                 _ => {
                     self.diagnostics.push(diagnostic!(
                         Error,
@@ -1067,9 +940,10 @@ impl Analyser {
                     ConstValue::Unknown
                 }
             },
-            (None, rhs @ ConstValue::Int(x)) => match op {
+            (None, Some(rhs @ ConstValue::Int(x))) => match op {
                 ConstExprOpType::UnaryMinus => ConstValue::Int(-x),
                 ConstExprOpType::BitNot => ConstValue::Int(!x),
+                ConstExprOpType::Range => ConstValue::Range(None, Some(x)),
                 _ => {
                     self.diagnostics.push(diagnostic!(
                         Error,
@@ -1079,7 +953,15 @@ impl Analyser {
                     ConstValue::Unknown
                 }
             },
-            (Some(lhs @ ConstValue::Bool(x)), rhs @ ConstValue::Bool(y)) => match op {
+            (Some(lhs @ ConstValue::Int(x)), None) => match op {
+                ConstExprOpType::Range => ConstValue::Range(Some(x), None),
+                _ => unreachable!("parser bug: invalid constexpr: {expr:#?}"),
+            },
+            (None, None) => match op {
+                ConstExprOpType::Range => ConstValue::Range(None, None),
+                _ => unreachable!("parser bug: invalid constexpr: {expr:#?}"),
+            },
+            (Some(lhs @ ConstValue::Bool(x)), Some(rhs @ ConstValue::Bool(y))) => match op {
                 ConstExprOpType::Eq => ConstValue::Bool(x == y),
                 ConstExprOpType::Neq => ConstValue::Bool(x != y),
                 ConstExprOpType::And => ConstValue::Bool(x && y),
@@ -1098,7 +980,7 @@ impl Analyser {
                     ConstValue::Unknown
                 }
             },
-            (None, rhs @ ConstValue::Bool(x)) => match op {
+            (None, Some(rhs @ ConstValue::Bool(x))) => match op {
                 ConstExprOpType::Not => ConstValue::Bool(!x),
                 _ => {
                     self.diagnostics.push(diagnostic!(
@@ -1117,11 +999,13 @@ impl Analyser {
                         variant: x,
                     },
                 ),
-                rhs @ ConstValue::Enum {
-                    module_id: rhs_module,
-                    enum_name: rhs_enum,
-                    variant: y,
-                },
+                Some(
+                    rhs @ ConstValue::Enum {
+                        module_id: rhs_module,
+                        enum_name: rhs_enum,
+                        variant: y,
+                    },
+                ),
             ) if lhs_module == rhs_module && lhs_enum == rhs_enum => match op {
                 ConstExprOpType::Eq => ConstValue::Bool(x == y),
                 ConstExprOpType::Neq => ConstValue::Bool(x != y),
@@ -1146,34 +1030,55 @@ impl Analyser {
                         variant: x,
                     },
                 ),
-                rhs @ ConstValue::Enum {
-                    module_id: rhs_module,
-                    enum_name: rhs_enum,
-                    variant: y,
-                },
+                Some(
+                    rhs @ ConstValue::Enum {
+                        module_id: rhs_module,
+                        enum_name: rhs_enum,
+                        variant: y,
+                    },
+                ),
             ) => {
                 todo!("different enums cannot be compared");
                 ConstValue::Unknown
             }
-            (Some(ConstValue::Unknown), _) | (_, ConstValue::Unknown) => ConstValue::Unknown,
-            (Some(lhs), rhs) => {
-                self.diagnostics.push(diagnostic!(
-                    Error,
-                    AnalyserError::invalid_binary_op(
-                        op.as_string(),
-                        lhs.get_type().type_name(),
-                        rhs.get_type().type_name()
-                    ),
-                    pos = pos,
-                ));
+            (Some(ConstValue::Unknown), _) | (_, Some(ConstValue::Unknown)) => ConstValue::Unknown,
+            (Some(lhs), Some(rhs)) => {
+                if *op == ConstExprOpType::Range {
+                    self.diagnostics.push(diagnostic!(
+                        Error,
+                        AnalyserError::invalid_range_types(
+                            lhs.get_type().type_name(),
+                            rhs.get_type().type_name()
+                        ),
+                        pos = pos,
+                    ));
+                } else {
+                    self.diagnostics.push(diagnostic!(
+                        Error,
+                        AnalyserError::invalid_binary_op(
+                            op.as_string(),
+                            lhs.get_type().type_name(),
+                            rhs.get_type().type_name()
+                        ),
+                        pos = pos,
+                    ));
+                }
                 ConstValue::Unknown
             }
-            (None, rhs) => {
-                self.diagnostics.push(diagnostic!(
-                    Error,
-                    AnalyserError::invalid_unary_op(op.as_string(), rhs.get_type().type_name()),
-                    pos = pos,
-                ));
+            (None, Some(x)) | (Some(x), None) => {
+                if *op == ConstExprOpType::Range {
+                    self.diagnostics.push(diagnostic!(
+                        Error,
+                        AnalyserError::invalid_range_type(x.get_type().type_name()),
+                        pos = pos,
+                    ));
+                } else {
+                    self.diagnostics.push(diagnostic!(
+                        Error,
+                        AnalyserError::invalid_unary_op(op.as_string(), x.get_type().type_name()),
+                        pos = pos,
+                    ));
+                }
                 ConstValue::Unknown
             }
         };
@@ -1370,7 +1275,7 @@ impl Analyser {
         }
     }
 
-    fn type_check_circs(&mut self) -> Result<(), Diagnostics> {
+    fn type_check_circs(&mut self) -> Result<CircId, Diagnostics> {
         let root_scope = self
             .module_exports
             .get(&Loader::ROOT_MODULE)
@@ -1415,9 +1320,9 @@ impl Analyser {
             args: Rc::from([]),
         };
 
-        self.type_check_circ(main_sig)?;
+        let main_circ_id = self.type_check_circ(main_sig)?;
 
-        todo!();
+        Ok(main_circ_id)
     }
 
     fn type_check_circ(&mut self, signature: CircSignature) -> Result<CircId, Diagnostics> {
@@ -1832,6 +1737,7 @@ impl Analyser {
         circ: &mut CircBuilder,
         node: &Node,
     ) -> Result<(), Diagnostics> {
+        dbg!(&node);
         let (mut lhs, direction, mut rhs) = extract!(
             node.node_type(),
             NodeType::Connection {
@@ -1841,25 +1747,39 @@ impl Analyser {
             }
         );
 
-        let connection = match direction {
-            ConnectionDirection::LeftToRight => circ.connection().unidirectional(),
+        let mut connection = match direction {
+            ConnectionDirection::LeftToRight => ConnectionBuilder::default().unidirectional(),
             ConnectionDirection::RightToLeft => {
                 std::mem::swap(&mut lhs, &mut rhs);
-                circ.connection().unidirectional()
+                ConnectionBuilder::default().unidirectional()
             }
-            ConnectionDirection::Bidrectional => circ.connection().bidirectional(),
+            ConnectionDirection::Bidrectional => ConnectionBuilder::default().bidirectional(),
         };
 
         let lhs = self.evaluate_pinexpr(ctx, circ, lhs)?;
-
         let rhs = self.evaluate_pinexpr(ctx, circ, rhs)?;
+
+        match connection.connect(lhs, rhs) {
+            Ok(_) => {
+                circ.add_connection(connection);
+            }
+            Err(CannotConnectReason::Unknown) => (),
+            Err(CannotConnectReason::DirectionMismatch {
+                conn_type,
+                lhs,
+                rhs,
+            }) => todo!("direction mismatch diagnostic: {conn_type:#?} {lhs:#?} {rhs:#?}"),
+            Err(CannotConnectReason::InvalidEndpoint { lhs, rhs }) => {
+                todo!("invalid endpoint diagnostic")
+            }
+            Err(CannotConnectReason::WidthMismatch(lhs, rhs)) => todo!("width mismatch diagnostic"),
+        }
 
         Ok(())
     }
 
     fn resolve_pinexpr_ident(
         &mut self,
-        ctx: &mut AnalyserContext,
         circ: &mut CircBuilder,
         name: IdentId,
     ) -> Result<PinExprType, Diagnostics> {
@@ -1885,51 +1805,33 @@ impl Analyser {
     fn evaluate_pinexpr_range(
         &mut self,
         ctx: &mut AnalyserContext,
-        range: &Range,
+        range: &Node,
     ) -> Result<PinExprType, Diagnostics> {
-        match range {
-            Range::Index(expr) => {
-                let index = catch_errors!(
-                    self,
-                    self.evaluate_constexpr(ctx, &expr),
-                    ConstValue::Unknown
-                );
+        let value = catch_errors!(
+            self,
+            self.evaluate_constexpr(ctx, range),
+            ConstValue::Unknown
+        );
 
-                if index.is_unknown() {
-                    return Ok(PinExprType::Unknown);
-                };
-
-                match index {
-                    ConstValue::Int(x) if x > 0 => Ok(PinExprType::Index(x as usize)),
-                    ConstValue::Int(_) => todo!("invalid index diagnostic"),
-                    _ => todo!("invalid index type diagnostic"),
+        match value {
+            ConstValue::Int(x) => {
+                if x >= 0 {
+                    Ok(PinExprType::Index(x as usize))
+                } else {
+                    todo!("invalid index value: {x}")
                 }
             }
-            Range::Range(start, end, _) => {
-                let start_val = start.as_ref().map(|start| {
-                    catch_errors!(
-                        self,
-                        self.evaluate_constexpr(ctx, start),
-                        ConstValue::Unknown
-                    )
-                });
-
-                let start_val = match start_val {
+            ConstValue::Range(start, end) => {
+                let start_val = match start {
                     None => Some(None),
-                    Some(ConstValue::Int(x)) if x > 0 => Some(Some(x as usize)),
-                    Some(ConstValue::Int(_)) => todo!("invalid index diagnostic"),
-                    _ => todo!("invalid index type diagnostic"),
+                    Some(x) if x >= 0 => Some(Some(x as usize)),
+                    Some(_) => todo!("invalid index diagnostic"),
                 };
 
-                let end_val = end.as_ref().map(|end| {
-                    catch_errors!(self, self.evaluate_constexpr(ctx, end), ConstValue::Unknown)
-                });
-
-                let end_val = match end_val {
+                let end_val = match end {
                     None => Some(None),
-                    Some(ConstValue::Int(x)) if x > 0 => Some(Some(x as usize)),
-                    Some(ConstValue::Int(_)) => todo!("invalid index diagnostic"),
-                    _ => todo!("invalid index type diagnostic"),
+                    Some(x) if x >= 0 => Some(Some(x as usize)),
+                    Some(_) => todo!("invalid index diagnostic"),
                 };
 
                 match (start_val, end_val) {
@@ -1937,6 +1839,8 @@ impl Analyser {
                     _ => Ok(PinExprType::Unknown),
                 }
             }
+            ConstValue::Unknown => Ok(PinExprType::Unknown),
+            _ => todo!("invalid index type diagnostic: {value:#?}"),
         }
     }
 
@@ -1969,7 +1873,7 @@ impl Analyser {
                         format!(
                             "index {} out of bounds for bit slice [{}] of pin '{}'",
                             index,
-                            ConnectionRange::Range(start, end),
+                            RangeDisplay(start, end),
                             self.resolve_ident(pin.name)
                         ),
                         pos = pos,
@@ -2044,12 +1948,12 @@ impl Analyser {
                         if let Some(arr_index) = arr_index {
                             format!(
                                 "index {} out of bounds for bit slice [{}] of pin '{}[{arr_index}].{}'",
-                                index, ConnectionRange::Range(start, end), self.resolve_ident(name), self.resolve_ident(pin.name)
+                                index, RangeDisplay(start, end), self.resolve_ident(name), self.resolve_ident(pin.name)
                             )
                         } else {
                             format!(
                                 "index {} out of bounds for bit slice [{}] of pin '{}.{}'",
-                                index, ConnectionRange::Range(start, end), self.resolve_ident(name), self.resolve_ident(pin.name)
+                                index, RangeDisplay(start, end), self.resolve_ident(name), self.resolve_ident(pin.name)
                             )
                         },
                         pos = pos,
@@ -2086,7 +1990,7 @@ impl Analyser {
         start: Option<usize>,
         end: Option<usize>,
     ) -> bool {
-        let range = ConnectionRange::Range(start, end);
+        let range = RangeDisplay(start, end);
 
         match lhs {
             PinExprType::Pin { pin, .. } => {
@@ -2124,7 +2028,7 @@ impl Analyser {
                         format!(
                             "range {} out of bounds for bit slice [{}] of pin '{}'",
                             range,
-                            ConnectionRange::Range(start, end),
+                            RangeDisplay(start, end),
                             self.resolve_ident(pin.name)
                         ),
                         pos = pos,
@@ -2187,12 +2091,12 @@ impl Analyser {
                         if let Some(arr_index) = arr_index {
                             format!(
                                 "range {} out of bounds for bit slice [{}] of pin '{}[{arr_index}].{}'",
-                                range, ConnectionRange::Range(start, end), self.resolve_ident(name), self.resolve_ident(pin.name)
+                                range, RangeDisplay(start, end), self.resolve_ident(name), self.resolve_ident(pin.name)
                             )
                         } else {
                             format!(
                                 "range {} out of bounds for bit slice [{}] of pin '{}.{}'",
-                                range, ConnectionRange::Range(start, end), self.resolve_ident(name), self.resolve_ident(pin.name)
+                                range, RangeDisplay(start, end), self.resolve_ident(name), self.resolve_ident(pin.name)
                             )
                         },
                         pos = pos,
@@ -2226,9 +2130,11 @@ impl Analyser {
 
         let (lhs, op, rhs) = match node.node_type() {
             NodeType::PinExpr { lhs, op, rhs } => (lhs, op, rhs),
-            NodeType::Identifier(name) => return self.resolve_pinexpr_ident(ctx, circ, *name),
-            NodeType::Range(range) => return self.evaluate_pinexpr_range(ctx, range),
-            _ => unreachable!("parser bug"),
+            NodeType::Identifier(name) => return self.resolve_pinexpr_ident(circ, *name),
+            NodeType::ConstExpr { .. } | NodeType::Integer(_) => {
+                return self.evaluate_pinexpr_range(ctx, node)
+            }
+            _ => unreachable!("parser bug: {node:#?}"),
         };
 
         let lhs = lhs.as_ref().map(|node| {
@@ -2238,17 +2144,6 @@ impl Analyser {
                 PinExprType::Unknown
             )
         });
-
-        // let result = match (lhs, rhs) {
-        //     (Some(lhs @ PinExprType::DepedencyArray { name, circ_id, len }), rhs @ PinExprType::Index(index)) => match op {
-        //         PinExprOpType::Index => PinExprType::Dependency {
-        //             name,
-        //             circ_id,
-        //             index,
-        //         },
-        //         _ => todo!("invalid op between ...")
-        //     },
-        //     (Some(lhs @))
 
         let result = match op {
             PinExprOpType::GetChild => {
@@ -2317,7 +2212,7 @@ impl Analyser {
                 // TODO: optimise this
                 match (lhs, rhs) {
                     (
-                        PinExprType::DependencyArray { name, circ_id, len },
+                        PinExprType::DependencyArray { name, circ_id, .. },
                         PinExprType::Index(idx),
                     ) => PinExprType::Dependency {
                         name,

@@ -8,8 +8,8 @@ use crate::util::{ChainMap, Pos, Position};
 use core::iter::Peekable;
 
 use crate::ast::{
-    Associativity, ConnectionDirection, ConstExprOpType, Decl, Node, NodeType, PinDirection,
-    PinExprOpType, Range, StatementType, AST,
+    Associativity, ConnectionDirection, ConstExprOpType, Node, NodeType, PinDirection,
+    PinExprOpType, AST,
 };
 
 #[derive(Debug)]
@@ -750,7 +750,7 @@ impl<'a> Parser<'a> {
             return ParseResult::none();
         };
 
-        self.expect_next_token_is(punctuation!(Semicolon));
+        self.expect_next_token_is(punctuation!(Semicolon))?;
 
         ParseResult::some(node.pin_decls(direction, decls).build(&self.last_token_pos))
     }
@@ -1091,12 +1091,13 @@ impl<'a> Parser<'a> {
                             let range = recover!(
                                 self,
                                 {
-                                    let result = self.parse_range().wrap()?;
+                                    let result = self.parse_constexpr().wrap()?;
                                     self.expect_next_token_is(punctuation!(RSquare))?;
                                     Ok(result)
                                 },
                                 [punctuation!(RSquare)]
                             )?;
+                            dbg!(&range);
                             stack.push(StackItem::ConstExpr(
                                 range.unwrap_or_else(|| unreachable!()),
                             ));
@@ -1163,42 +1164,16 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_range(&mut self) -> AlwaysResult<Node> {
-        let start = self.parse_constexpr_maybe_empty()?;
-        let range_tk = match self.peek_next_token()?.token_type() {
-            tt::Punctuation(pt::Range) => Some(self.consume_token()?),
-            _ => None,
-        };
-
-        if range_tk.is_some() {
-            let range_tk_pos = range_tk.as_ref().unwrap().pos();
-            let end = self.parse_constexpr_maybe_empty()?;
-            let start_pos = start.as_ref().map(|s| s.pos()).unwrap_or(range_tk_pos);
-            let end_pos = end.as_ref().map(|e| e.pos()).unwrap_or(range_tk_pos);
-
-            Ok(NodeBuilder::new(&start_pos)
-                .range(Range::Range(start, end, range_tk.unwrap()))
-                .build(&end_pos))
-        } else if start.is_some() {
-            let pos = start.as_ref().unwrap().pos();
-            Ok(NodeBuilder::new(&pos)
-                .range(Range::Index(start.unwrap()))
-                .build(&pos))
-        } else {
-            recover!()
-        }
-    }
-
     fn parse_constexpr_with_starting_ident(&mut self, ident: Option<Token>) -> AlwaysResult<Node> {
         #[derive(Debug)]
         enum StackItem {
-            Operator(ConstExprOpType),
+            Operator((ConstExprOpType, Pos)),
             Value(Node),
         }
 
         enum OpItem {
             LParen(Pos),
-            Op(ConstExprOpType),
+            Op((ConstExprOpType, Pos)),
         }
         let mut stack = Vec::new();
         let mut operator_stack = Vec::new();
@@ -1261,7 +1236,8 @@ impl<'a> Parser<'a> {
                         break;
                     };
 
-                    if expect_value {
+                    if op == ConstExprOpType::Range {
+                    } else if expect_value {
                         op = match op {
                             op if op.unary_equivalent().is_some() => op.unary_equivalent().unwrap(),
                             op if op.associativity() == Associativity::Unary => op,
@@ -1278,20 +1254,21 @@ impl<'a> Parser<'a> {
                         recover!();
                     }
 
-                    self.consume_token()?;
+                    let op_pos = self.consume_token()?.pos();
 
                     loop {
                         match operator_stack.last() {
-                            Some(OpItem::Op(top_op)) => {
+                            Some(OpItem::Op((top_op, _))) => {
                                 if top_op.higher_precedence(&op)
                                     || (op.associativity() == Associativity::Left
                                         && op.precedence() == top_op.precedence())
                                 {
-                                    let Some(OpItem::Op(top_op)) = operator_stack.pop() else {
+                                    let Some(OpItem::Op((top_op, pos))) = operator_stack.pop()
+                                    else {
                                         unreachable!()
                                     };
 
-                                    stack.push(StackItem::Operator(top_op));
+                                    stack.push(StackItem::Operator((top_op, pos)));
                                 } else {
                                     break;
                                 }
@@ -1300,7 +1277,7 @@ impl<'a> Parser<'a> {
                         }
                     }
 
-                    operator_stack.push(OpItem::Op(op));
+                    operator_stack.push(OpItem::Op((op, op_pos)));
                     expect_value = true;
                 }
             }
@@ -1325,14 +1302,38 @@ impl<'a> Parser<'a> {
             stack: &mut Vec<StackItem>,
         ) -> AlwaysResult<Node> {
             match stack.pop() {
-                Some(StackItem::Operator(op)) if op.associativity() == Associativity::Unary => {
+                Some(StackItem::Operator((ConstExprOpType::Range, pos))) => {
+                    // I don't know why we parse lhs first but it works and parsing rhs first
+                    // doesn't
+                    let lhs = if stack.is_empty() {
+                        None
+                    } else {
+                        Some(_build_constexpr_node_from_stack(parser, stack)?)
+                    };
+
+                    let rhs = if stack.is_empty() {
+                        None
+                    } else {
+                        Some(_build_constexpr_node_from_stack(parser, stack)?)
+                    };
+
+                    let start_pos = lhs.as_ref().map_or(pos, |lhs| lhs.pos());
+                    let end_pos = rhs.as_ref().map_or(pos, |rhs| rhs.pos());
+
+                    Ok(NodeBuilder::new(&start_pos)
+                        .const_expr_range(lhs, rhs)
+                        .build(&end_pos))
+                }
+                Some(StackItem::Operator((op, _)))
+                    if op.associativity() == Associativity::Unary =>
+                {
                     let rhs = _build_constexpr_node_from_stack(parser, stack)?;
                     let end_pos = rhs.pos();
                     Ok(NodeBuilder::new(&rhs)
                         .const_expr_unary(op, rhs)
                         .build(&end_pos))
                 }
-                Some(StackItem::Operator(op)) => {
+                Some(StackItem::Operator((op, _))) => {
                     let rhs = _build_constexpr_node_from_stack(parser, stack)?;
                     let lhs = _build_constexpr_node_from_stack(parser, stack)?;
                     let end_pos = rhs.pos();
@@ -1438,7 +1439,6 @@ impl<'a> Parser<'a> {
     fn consume_token(&mut self) -> AlwaysResult<Token> {
         match self.tokens.next() {
             Some(tk) => {
-                println!("consumed {tk:#?}");
                 self.last_token_pos = tk.pos();
                 Ok(tk.clone())
             }
@@ -1674,10 +1674,6 @@ impl NodeBuilder {
         self.node_type(NodeType::Statement(Box::new(statement)))
     }
 
-    pub fn range(self, range: Range) -> Self {
-        self.node_type(NodeType::Range(Box::new(range)))
-    }
-
     pub fn r#type(self, name: Node, args: Vec<Node>) -> Self {
         self.node_type(NodeType::Type {
             name: Box::new(name),
@@ -1708,20 +1704,24 @@ impl NodeBuilder {
         })
     }
 
-    pub fn const_expr(self, lhs: Option<Node>, op: ConstExprOpType, rhs: Node) -> Self {
+    pub fn const_expr(self, lhs: Option<Node>, op: ConstExprOpType, rhs: Option<Node>) -> Self {
         self.node_type(NodeType::ConstExpr {
             lhs: lhs.map(Box::new),
             op,
-            rhs: Box::new(rhs),
+            rhs: rhs.map(Box::new),
         })
     }
 
     pub fn const_expr_unary(self, op: ConstExprOpType, rhs: Node) -> Self {
-        self.const_expr(None, op, rhs)
+        self.const_expr(None, op, Some(rhs))
     }
 
     pub fn const_expr_binary(self, lhs: Node, op: ConstExprOpType, rhs: Node) -> Self {
-        self.const_expr(Some(lhs), op, rhs)
+        self.const_expr(Some(lhs), op, Some(rhs))
+    }
+
+    pub fn const_expr_range(self, lhs: Option<Node>, rhs: Option<Node>) -> Self {
+        self.const_expr(lhs, ConstExprOpType::Range, rhs)
     }
 
     pub fn assert(self, constexpr: Node) -> Self {

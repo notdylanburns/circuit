@@ -1,6 +1,6 @@
 use crate::loader::ModuleId;
 use crate::tokeniser::{punctuation, IdentId, PunctuationType, Token, TokenType};
-use crate::util::{Interner, Pos, Position};
+use crate::util::{Pos, Position};
 
 #[derive(Debug)]
 pub struct AST {
@@ -42,23 +42,6 @@ impl IntoIterator for AST {
     }
 }
 
-#[derive(Debug)]
-pub enum Range {
-    Index(Node),
-    Range(Option<Node>, Option<Node>, Token),
-}
-
-impl Position for Range {
-    fn pos(&self) -> Pos {
-        // TODO: Fix the range pos logic
-        match self {
-            Self::Index(node) => node.pos(),
-            Self::Range(Some(n), _, _) | Self::Range(_, Some(n), _) => n.pos(),
-            Self::Range(_, _, n) => n.pos(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PinDirection {
     Input,
@@ -71,82 +54,6 @@ pub enum ConnectionDirection {
     LeftToRight,
     RightToLeft,
     Bidrectional,
-}
-
-#[derive(Debug)]
-pub struct Decl {
-    name: Node,
-    count: Option<Node>,
-}
-
-impl Decl {
-    pub fn new(name: Node) -> Self {
-        Self { name, count: None }
-    }
-
-    pub fn new_array(name: Node, count: Node) -> Self {
-        Self {
-            name,
-            count: Some(count),
-        }
-    }
-
-    pub fn name(&self) -> &Node {
-        &self.name
-    }
-
-    pub fn count(&self) -> Option<&Node> {
-        self.count.as_ref()
-    }
-}
-
-#[derive(Debug)]
-pub enum StatementType {
-    Assert {
-        expr: Node,
-    },
-    ConstDecl(Node),
-    Decl {
-        r#type: Node,
-        decls: Vec<Decl>,
-    },
-    PinDecl {
-        direction: PinDirection,
-        decls: Vec<Decl>,
-    },
-    PinExpr(Node),
-    If(Node),
-    With(Vec<Node>),
-}
-
-impl StatementType {
-    pub fn assert(expr: Node) -> Self {
-        Self::Assert { expr }
-    }
-
-    pub fn const_decl(node: Node) -> Self {
-        Self::ConstDecl(node)
-    }
-
-    pub fn decl(r#type: Node, decls: Vec<Decl>) -> Self {
-        Self::Decl { r#type, decls }
-    }
-
-    pub fn pin_decl(direction: PinDirection, decls: Vec<Decl>) -> Self {
-        Self::PinDecl { direction, decls }
-    }
-
-    pub fn pin_expr(node: Node) -> Self {
-        Self::PinExpr(node)
-    }
-
-    pub fn with(decls: Vec<Node>) -> Self {
-        Self::With(decls)
-    }
-
-    pub fn r#if(node: Node) -> Self {
-        Self::If(node)
-    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -237,29 +144,29 @@ macro_rules! const_expr_ops {
 }
 
 const_expr_ops! {
-    Add(2, Left, Plus),
-    Sub(2, Left, Minus, UnaryMinus),
-    Mul(3, Left, Star),
-    Div(3, Left, Slash),
-    Mod(3, Left, Percent),
+    Add(3, Left, Plus),
+    Sub(3, Left, Minus, UnaryMinus),
+    Mul(4, Left, Star),
+    Div(4, Left, Slash),
+    Mod(4, Left, Percent),
     And(0, Left, DAmpersand),
     Or(0, Left, DPipe),
     Xor(0, Left, DCaret),
-    Not(6, Unary, Exclamation),
-    Shl(5, Left, DLessThan),
-    Shr(5, Left, DGreaterThan),
+    Not(7, Unary, Exclamation),
+    Shl(6, Left, DLessThan),
+    Shr(6, Left, DGreaterThan),
     Eq(1, Left, DEqual),
     Neq(1, Left, ExclamationEqual),
     Lt(1, Left, LessThan),
     Lte(1, Left, LessThanEqual),
     Gt(1, Left, GreaterThan),
     Gte(1, Left, GreaterThanEqual),
-    BitAnd(4, Left, Ampersand),
-    BitOr(4, Left, Pipe),
-    BitXor(4, Left, Caret),
-    BitNot(7, Unary, Tilde),
-    UnaryMinus(7, Unary),
-    Range(6, Left, Range),
+    BitAnd(5, Left, Ampersand),
+    BitOr(5, Left, Pipe),
+    BitXor(5, Left, Caret),
+    BitNot(8, Unary, Tilde),
+    UnaryMinus(8, Unary),
+    Range(2, Left, Range),
 }
 
 macro_rules! pin_expr_ops {
@@ -369,7 +276,6 @@ pub enum NodeType {
         name: Option<Box<Node>>,
         value: Box<Node>,
     },
-    Range(Box<Range>),
     PinExpr {
         lhs: Option<Box<Node>>,
         op: PinExprOpType,
@@ -378,7 +284,7 @@ pub enum NodeType {
     ConstExpr {
         lhs: Option<Box<Node>>,
         op: ConstExprOpType,
-        rhs: Box<Node>,
+        rhs: Option<Box<Node>>,
     },
     Assert(Box<Node>),
     Import(Box<Node>),

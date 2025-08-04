@@ -55,15 +55,15 @@ mod tests {
                 let items: Vec<_> = stack.iter().collect();
                 assert_eq!(items, vec![&3, &2, &1]);
 
-                assert_eq!(items.find(&2), Some(1));
-                assert_eq!(items.find(&3), Some(0));
-                assert_eq!(items.find(&4), None);
+                assert_eq!(stack.find(&2), Some(1));
+                assert_eq!(stack.find(&3), Some(0));
+                assert_eq!(stack.find(&4), None);
 
-                assert_eq!(items.get(1), Some(&2));
+                assert_eq!(items.get(1), Some(&&2));
             }
 
             assert_eq!(stack.iter().next(), Some(&2));
-            assert_eq!(items.find(&3), None);
+            assert_eq!(stack.find(&3), None);
         }
 
         assert_eq!(stack.iter().next(), Some(&1));

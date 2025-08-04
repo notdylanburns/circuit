@@ -65,7 +65,7 @@ pub(super) enum ConstValue {
         enum_name: IdentId,
         variant: IdentId,
     },
-    Range(isize, isize),
+    Range(Option<isize>, Option<isize>),
 }
 
 impl ConstValue {

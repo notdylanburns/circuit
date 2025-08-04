@@ -1,5 +1,5 @@
+use std::collections::HashMap;
 use std::hash::Hash;
-use std::{collections::HashMap, default};
 
 mod chain_map;
 pub use chain_map::ChainMap;
@@ -230,8 +230,16 @@ impl<K: Eq + Hash, V> OrderedMap<K, V> {
         self.items.iter()
     }
 
+    pub fn value_indices(&self) -> impl Iterator<Item = (usize, &V)> {
+        self.items.iter().enumerate()
+    }
+
     pub fn values_mut(&mut self) -> impl Iterator<Item = &mut V> {
         self.items.iter_mut()
+    }
+
+    pub fn into_values(self) -> Vec<V> {
+        self.items
     }
 }
 
@@ -273,6 +281,20 @@ macro_rules! difference {
             rhs - lhs
         }
     }};
+}
+
+pub fn div_up(a: usize, b: usize) -> usize {
+    (0..a).step_by(b).size_hint().0
+}
+
+pub fn invert_hashmap<K, V: Eq + Hash>(hm: HashMap<K, V>) -> HashMap<V, Vec<K>> {
+    let mut new = HashMap::new();
+
+    for (k, v) in hm {
+        new.entry(v).or_insert(vec![]).push(k);
+    }
+
+    new
 }
 
 pub(super) use {difference, extract};

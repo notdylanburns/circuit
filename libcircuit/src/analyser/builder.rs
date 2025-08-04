@@ -1,6 +1,6 @@
 use super::{
     Circ, CircId, Connection, ConnectionEndpoint, ConnectionRange, ConnectionType, IdentId, Pin,
-    PinId,
+    PinDirection, PinExprType, PinId,
 };
 use crate::util::OrderedMap;
 
@@ -19,7 +19,7 @@ enum ConnectionEndpointBuilder {
     },
 }
 
-#[derive(Default)]
+#[derive(Default, PartialEq, Eq, Clone, Copy)]
 enum EndpointBuilderType {
     #[default]
     None,
@@ -38,48 +38,22 @@ pub(super) struct EndpointBuilder {
 
 impl EndpointBuilder {
     pub(super) fn pin_id(&mut self, pin: PinId) -> &mut Self {
-        self.t = EndpointBuilderType::Pin;
+        if self.t == EndpointBuilderType::None {
+            self.t = EndpointBuilderType::Pin;
+        }
         self.pin.replace(pin);
         self
     }
 
-    pub(super) fn name(&mut self, name: IdentId) -> &mut Self {
-        self.t = EndpointBuilderType::Dependency;
-        self.dependency_name.replace(name);
-        self.index = None;
-        self
-    }
-
-    pub(super) fn array_index(&mut self, array_name: IdentId, index: usize) -> &mut Self {
+    pub(super) fn dependency(&mut self, array_name: IdentId, index: Option<usize>) -> &mut Self {
         self.t = EndpointBuilderType::Dependency;
         self.dependency_name.replace(array_name);
-        self.index = Some(index);
+        self.index = index;
         self
     }
 
-    pub(super) fn full(&mut self) -> &mut Self {
-        self.range.replace(ConnectionRange::FULL);
-        self
-    }
-
-    pub(super) fn single(&mut self, index: usize) -> &mut Self {
-        self.range.replace(ConnectionRange::Single(index));
-        self
-    }
-
-    pub(super) fn range_unbound_end(&mut self, start: usize) -> &mut Self {
-        self.range
-            .replace(ConnectionRange::Range(Some(start), None));
-        self
-    }
-
-    pub(super) fn range_unbound_start(&mut self, end: usize) -> &mut Self {
-        self.range.replace(ConnectionRange::Range(None, Some(end)));
-        self
-    }
-
-    pub(super) fn range(&mut self, start: Option<usize>, end: Option<usize>) -> &mut Self {
-        self.range.replace(ConnectionRange::Range(start, end));
+    pub(super) fn range(&mut self, start: usize, end: usize) -> &mut Self {
+        self.range.replace(ConnectionRange { start, end });
         self
     }
 
@@ -90,9 +64,7 @@ impl EndpointBuilder {
                 pin_id: self
                     .pin
                     .unwrap_or_else(|| unreachable!("pin field not set for PinEndpointBuilder")),
-                range: self
-                    .range
-                    .unwrap_or_else(|| unreachable!("range field not set for PinEndpointBuilder")),
+                range: self.range.unwrap_or_else(|| unreachable!("range not set")),
             },
             EndpointBuilderType::Dependency => ConnectionEndpointBuilder::Dependency {
                 dependency_name: self.dependency_name.unwrap_or_else(|| {
@@ -102,16 +74,38 @@ impl EndpointBuilder {
                 pin_id: self.pin.unwrap_or_else(|| {
                     unreachable!("pin field not set for DependencyEndpointBuilder")
                 }),
-                range: self.range.unwrap_or_else(|| {
-                    unreachable!("range field not set for DependencyEndpointBuilder")
-                }),
+                range: self.range.unwrap_or_else(|| unreachable!("range not set")),
             },
         }
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ConnType {
+    PinToPin,
+    PinToDep,
+    DepToPin,
+    DepToDep,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CannotConnectReason {
+    Unknown,
+    WidthMismatch(usize, usize),
+    DirectionMismatch {
+        conn_type: ConnType,
+        lhs: PinDirection,
+        rhs: PinDirection,
+    },
+    InvalidEndpoint {
+        lhs: bool,
+        rhs: bool,
+    },
+}
+
 #[derive(Default)]
-struct ConnectionBuilder {
+pub(super) struct ConnectionBuilder {
+    width: Option<usize>,
     source: EndpointBuilder,
     dest: EndpointBuilder,
     connection_type: Option<ConnectionType>,
@@ -122,22 +116,126 @@ impl ConnectionBuilder {
         Self::default()
     }
 
-    pub(super) fn unidirectional(&mut self) -> &mut Self {
+    pub(super) fn unidirectional(mut self) -> Self {
         self.connection_type.replace(ConnectionType::Unidirectional);
         self
     }
 
-    pub(super) fn bidirectional(&mut self) -> &mut Self {
+    pub(super) fn bidirectional(mut self) -> Self {
         self.connection_type.replace(ConnectionType::Bidirectional);
         self
     }
 
-    pub(super) fn source(&mut self) -> &mut EndpointBuilder {
-        &mut self.source
+    pub(super) fn connect(
+        &mut self,
+        lhs: PinExprType,
+        rhs: PinExprType,
+    ) -> Result<(), CannotConnectReason> {
+        if lhs.is_unknown() || rhs.is_unknown() {
+            return Err(CannotConnectReason::Unknown);
+        };
+
+        let lhs_valid = lhs.is_valid_endpoint();
+        let rhs_valid = rhs.is_valid_endpoint();
+
+        if !lhs_valid || !rhs_valid {
+            return Err(CannotConnectReason::InvalidEndpoint {
+                lhs: lhs_valid,
+                rhs: rhs_valid,
+            });
+        };
+
+        let conn_type = match (lhs.is_dependency_pin(), rhs.is_dependency_pin()) {
+            (false, false) => ConnType::PinToPin,
+            (false, true) => ConnType::PinToDep,
+            (true, false) => ConnType::DepToPin,
+            (true, true) => ConnType::DepToDep,
+        };
+
+        let lhs_dir = lhs.direction();
+        let rhs_dir = rhs.direction();
+
+        match (conn_type, lhs_dir, rhs_dir) {
+            (ConnType::PinToPin, PinDirection::Input, PinDirection::Output) => (),
+            (ConnType::DepToDep, PinDirection::Output, PinDirection::Input) => (),
+            (ConnType::PinToDep, PinDirection::Input, PinDirection::Input) => (),
+            (ConnType::DepToPin, PinDirection::Output, PinDirection::Output) => (),
+            (_, PinDirection::Transput, _) | (_, _, PinDirection::Transput) => (),
+            _ => {
+                return Err(CannotConnectReason::DirectionMismatch {
+                    conn_type,
+                    lhs: lhs_dir,
+                    rhs: rhs_dir,
+                })
+            }
+        };
+
+        let lhs_width = lhs.width();
+        let rhs_width = rhs.width();
+
+        if lhs_width != rhs_width {
+            return Err(CannotConnectReason::WidthMismatch(lhs_width, rhs_width));
+        };
+
+        self.width = Some(lhs_width);
+        self.set_source(lhs).set_destination(rhs);
+
+        Ok(())
     }
 
-    pub(super) fn destination(&mut self) -> &mut EndpointBuilder {
-        &mut self.source
+    fn get_endpoint(endpoint: PinExprType) -> EndpointBuilder {
+        let mut builder = EndpointBuilder::default();
+        match endpoint {
+            PinExprType::Unknown
+            | PinExprType::Index(_)
+            | PinExprType::Range(_, _)
+            | PinExprType::DependencyArray { .. }
+            | PinExprType::Dependency { .. } => unreachable!(),
+            PinExprType::Pin { pin_id, pin, .. } => builder.pin_id(pin_id).range(0, pin.width),
+            PinExprType::PinRange {
+                pin_id,
+                pin,
+                start,
+                end,
+                ..
+            } => builder
+                .pin_id(pin_id)
+                .range(start.unwrap_or(0), end.unwrap_or(pin.width)),
+            PinExprType::DependencyPin {
+                name,
+                index,
+                pin_id,
+                pin,
+                ..
+            } => builder
+                .dependency(name, index)
+                .pin_id(pin_id)
+                .range(0, pin.width),
+            PinExprType::DependencyPinRange {
+                name,
+                index,
+                pin_id,
+                pin,
+                start,
+                end,
+                ..
+            } => builder
+                .dependency(name, index)
+                .pin_id(pin_id)
+                .range(start.unwrap_or(0), end.unwrap_or(pin.width)),
+        };
+
+        builder
+    }
+
+    fn set_source(&mut self, endpoint: PinExprType) -> &mut Self {
+        self.source = Self::get_endpoint(endpoint);
+        self
+    }
+
+    fn set_destination(&mut self, endpoint: PinExprType) -> &mut Self {
+        self.dest = Self::get_endpoint(endpoint);
+        self
     }
 
     fn build_endpoint(
@@ -183,6 +281,7 @@ impl ConnectionBuilder {
             connection_type: self
                 .connection_type
                 .unwrap_or_else(|| unreachable!("ConnectionType not set")),
+            width: self.width.unwrap_or_else(|| unreachable!("width not set")),
         }
     }
 }
@@ -220,9 +319,9 @@ impl CircBuilder {
             .map(|id| (id, *self.pins.get(&name).unwrap()))
     }
 
-    pub(super) fn connection(&mut self) -> &mut ConnectionBuilder {
-        self.connections.push(ConnectionBuilder::new());
-        self.connections.last_mut().unwrap()
+    pub(super) fn add_connection(&mut self, connection: ConnectionBuilder) -> &mut Self {
+        self.connections.push(connection);
+        self
     }
 
     pub(super) fn build(self) -> Circ {
@@ -240,8 +339,14 @@ impl CircBuilder {
 
         let dependency_start_indicies = dependencies
             .clone()
-            .filter_map(|(name, i, _)| if i == 0 { Some((name, i)) } else { None })
+            .enumerate()
+            .inspect(|x| {
+                dbg!(x);
+            })
+            .filter_map(|(start, (name, i, _))| if i == 0 { Some((name, start)) } else { None })
             .collect::<HashMap<_, _>>();
+
+        dbg!(&dependency_start_indicies);
 
         let dependencies = dependencies
             .map(|(_, _, circ_id)| circ_id)
@@ -250,6 +355,7 @@ impl CircBuilder {
         let connections = self
             .connections
             .into_iter()
+            .filter(|c| c.width.is_some())
             .map(|c| c.build(&dependency_start_indicies))
             .collect::<Vec<_>>();
 

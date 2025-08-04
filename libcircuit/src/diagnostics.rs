@@ -173,7 +173,10 @@ impl Diagnostic {
 
         let bold = style!(bold);
 
-        let module_id = self.pos().module_id().expect("no module in pos");
+        let module_id = self
+            .pos()
+            .module_id()
+            .unwrap_or_else(|| unreachable!("no module in pos: {:#?}", self));
 
         let module = loader
             .get_module_mut(module_id)

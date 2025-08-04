@@ -1,23 +1,28 @@
-import std;
-
-circ Foo {
-    -> a[2], b[2];
+circ Baz {
+    -> a[2];
     <- q[2];
 
-    with std:And and1, and2;
+    a -> q;
+}
 
-    a[0] -> and1.a;
-    a[1] -> and2.a;
-    b[0] -> and1.b;
-    b[1] -> and2.b;
+circ Foo {
+    -> a[2];
+    <- q[2];
 
-    and1.q -> q[0];
-    and2.q -> q[1];
+    with Baz baz;
+
+    a[0] -> baz.a[0];
+    a[1] -> baz.a[1];
+    baz.q[0..] -> q[0..];
 }
 
 circ Main {
-    with Foo test;
+    -> a;
+    <- b;
 
-    1 -> test.a;
-    0 -> test.b;
+    with Foo test[2], test2;
+    a -> test[0].a[0];
+    test[0].q -> test[1].a;
+    test[1].q[1] -> test2.a[0];
+    test2.q[0] -> b;
 }

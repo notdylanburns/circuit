@@ -1,4 +1,4 @@
-use libcircuit::{Analyser, Loader};
+use libcircuit::{Analyser, AnalyserResult, Codegen, Loader, Optimiser};
 
 use std::collections::HashMap;
 use std::env::{args, Args};
@@ -26,22 +26,34 @@ fn main() -> ExitCode {
     };
 
     let analyser = Analyser::new(HashMap::new(), loader);
-    match analyser.analyse() {
-        Ok(result) => {
-            println!("{result:#?}");
-        }
-        Err(ds) => {
-            // for diagnostic in ds {
-            //     eprintln!(
-            //         "{}",
-            //         diagnostic
-            //             .to_string(&mut loader)
-            //             .unwrap_or_else(|_| unreachable!("format failure"))
-            //     );
-            // }
+    let (diagnostics, main, circs, loader) = match analyser.analyse() {
+        AnalyserResult::Success {
+            diagnostics,
+            main,
+            circs,
+            loader,
+        } => (diagnostics, main, circs, loader),
+        AnalyserResult::Error {
+            diagnostics,
+            mut loader,
+        } => {
+            for diagnostic in diagnostics {
+                eprintln!(
+                    "{}",
+                    diagnostic
+                        .to_string(&mut loader)
+                        .unwrap_or_else(|_| unreachable!("format failure"))
+                );
+            }
             return ExitCode::FAILURE;
         }
-    }
+    };
+
+    let optimiser_units = Optimiser::optimise_circs(circs, main);
+
+    let ir_blocks = Codegen::emit_ir(&optimiser_units, main);
+    let optimised_blocks = Optimiser::optimise_ir(ir_blocks);
+    println!("{optimised_blocks}");
 
     ExitCode::SUCCESS
 }
