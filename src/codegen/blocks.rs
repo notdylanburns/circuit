@@ -116,6 +116,7 @@ pub struct Blocks<C, D, R = D> {
     resv_blocks: Vec<Block<R>>,
     block_types: Vec<(BlockType, usize)>,
     entry: Option<BlockAddress>,
+    main_resv: Option<BlockAddress>,
 }
 
 impl<C, D, R> Default for Blocks<C, D, R> {
@@ -126,6 +127,7 @@ impl<C, D, R> Default for Blocks<C, D, R> {
             resv_blocks: vec![],
             block_types: vec![],
             entry: None,
+            main_resv: None,
         }
     }
 }
@@ -144,6 +146,10 @@ impl<C, D, R> Blocks<C, D, R> {
         next_id
     }
 
+    pub fn len(&self) -> usize {
+        self.block_types.len()
+    }
+
     pub fn new_code(&mut self) -> &mut Block<C> {
         let next_block_id = self.next_id(BlockType::Code);
         self.code_blocks
@@ -152,13 +158,15 @@ impl<C, D, R> Blocks<C, D, R> {
         self.code_blocks.last_mut().unwrap()
     }
 
-    pub fn push_code(&mut self, items: Vec<C>) {
+    pub fn push_code(&mut self, items: Vec<C>) -> usize {
         let id = self.next_id(BlockType::Code);
         self.code_blocks.push(Block {
             id,
             block_type: BlockType::Code,
             items,
         });
+
+        id
     }
 
     pub fn new_data(&mut self) -> &mut Block<D> {
@@ -169,13 +177,15 @@ impl<C, D, R> Blocks<C, D, R> {
         self.data_blocks.last_mut().unwrap()
     }
 
-    pub fn push_data(&mut self, items: Vec<D>) {
+    pub fn push_data(&mut self, items: Vec<D>) -> usize {
         let id = self.next_id(BlockType::Data);
         self.data_blocks.push(Block {
             id,
             block_type: BlockType::Data,
             items,
         });
+
+        id
     }
 
     pub fn new_resv(&mut self) -> &mut Block<R> {
@@ -186,21 +196,27 @@ impl<C, D, R> Blocks<C, D, R> {
         self.resv_blocks.last_mut().unwrap()
     }
 
-    pub fn push_resv(&mut self, items: Vec<R>) {
+    pub fn push_resv(&mut self, items: Vec<R>) -> usize {
         let id = self.next_id(BlockType::Resv);
         self.resv_blocks.push(Block {
             id,
             block_type: BlockType::Resv,
             items,
         });
+
+        id
     }
 
-    pub fn get_block_type(&mut self, id: usize) -> (BlockType, usize) {
+    pub fn get_block_type(&self, id: usize) -> (BlockType, usize) {
         self.block_types[id]
     }
 
     pub fn get_data_block(&self, id: usize) -> &Block<D> {
-        &self.data_blocks[id]
+        match self.get_block_type(id) {
+            (BlockType::Data, data_id) => &self.data_blocks[data_id],
+            (BlockType::Code, _) => unreachable!("expected data block, found code block"),
+            (BlockType::Resv, _) => unreachable!("expected data block, found reserved block"),
+        }
     }
 
     pub fn code_blocks<'a>(&'a self) -> impl Iterator<Item = &'a Block<C>> {
@@ -215,12 +231,28 @@ impl<C, D, R> Blocks<C, D, R> {
         self.data_blocks.iter()
     }
 
+    pub fn resv_blocks<'a>(&'a self) -> impl Iterator<Item = &'a Block<R>> {
+        self.resv_blocks.iter()
+    }
+
+    pub fn resv_blocks_mut<'a>(&'a mut self) -> impl Iterator<Item = &'a mut Block<R>> {
+        self.resv_blocks.iter_mut()
+    }
+
     pub fn set_entry(&mut self, addr: BlockAddress) {
         self.entry.replace(addr);
     }
 
     pub fn get_entry(&self) -> BlockAddress {
         self.entry.unwrap()
+    }
+
+    pub fn set_main_resv(&mut self, addr: BlockAddress) {
+        self.main_resv.replace(addr);
+    }
+
+    pub fn get_main_resv(&self) -> BlockAddress {
+        self.main_resv.unwrap()
     }
 }
 

@@ -1097,7 +1097,6 @@ impl<'a> Parser<'a> {
                                 },
                                 [punctuation!(RSquare)]
                             )?;
-                            dbg!(&range);
                             stack.push(StackItem::ConstExpr(
                                 range.unwrap_or_else(|| unreachable!()),
                             ));
@@ -1776,7 +1775,8 @@ impl NodeBuilder {
 #[cfg(test)]
 mod tests {
     use super::Parser;
-    use crate::{util::Interner, Loader, Tokeniser};
+    use crate::tokeniser::Tokeniser;
+    use crate::{util::Interner, Loader};
 
     #[test]
     fn parse_constexpr() {

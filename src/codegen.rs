@@ -1,4 +1,5 @@
 pub mod blocks;
+mod register_allocator;
 pub mod targets;
 
 use crate::{analyser::CircId, optimiser::OptimiserUnit};
@@ -8,9 +9,6 @@ pub struct Codegen;
 
 impl Codegen {
     pub fn emit_ir(units: &[OptimiserUnit], main: CircId) -> IrBlocks {
-        let b = IrGen::new(units).emit(main);
-        println!("{b}");
-
-        b
+        IrGen::new(units).emit(main)
     }
 }

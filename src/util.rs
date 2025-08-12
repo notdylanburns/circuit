@@ -297,6 +297,25 @@ pub fn invert_hashmap<K, V: Eq + Hash>(hm: HashMap<K, V>) -> HashMap<V, Vec<K>> 
     new
 }
 
+pub fn transpose<T, U>(m: &[U]) -> Vec<Vec<T>>
+where
+    U: AsRef<[T]>,
+    T: Clone,
+{
+    let cols = m.len();
+    let rows = m.iter().map(|x| x.as_ref().len()).max().unwrap_or(0);
+
+    let mut row_vec = vec![Vec::with_capacity(cols); rows];
+
+    for row in m.iter() {
+        for (j, item) in row.as_ref().iter().enumerate() {
+            row_vec[j].push(item.clone());
+        }
+    }
+
+    row_vec
+}
+
 pub(super) use {difference, extract};
 
 #[cfg(test)]

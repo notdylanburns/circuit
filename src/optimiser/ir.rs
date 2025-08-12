@@ -1,6 +1,6 @@
-use crate::codegen::blocks::{Block, BlockAddress};
+use crate::codegen::blocks::Block;
 use crate::codegen::targets::ir::{
-    Address, Constant, IrBlocks, Opcode, OpcodeKind, Register, Value,
+    Address, Constant, IrBlocks, Opcode, OpcodeKind, Register, ResvItem, Value,
 };
 
 use std::collections::HashMap;
@@ -18,7 +18,12 @@ impl IrOptimiser {
         };
 
         optimiser.blocks.set_entry(blocks.get_entry());
+        optimiser.blocks.set_main_resv(blocks.get_main_resv());
 
+        for block in blocks.resv_blocks() {
+            let new_id = optimiser.blocks.push_resv(block.items().to_vec());
+            optimiser.block_id_mapping.insert(block.id, new_id);
+        }
         optimiser.deduplicate_data_blocks(&blocks);
         optimiser.optimise_code_blocks(&blocks);
 
@@ -67,9 +72,22 @@ impl IrOptimiser {
             })
         }
 
+        for resv_block in self.blocks.resv_blocks_mut() {
+            resv_block.map_items(|&c| match c {
+                ResvItem::BlockAddress((blk, addr)) => {
+                    ResvItem::BlockAddress((self.block_id_mapping[&blk], addr))
+                }
+                ResvItem::Word(v) => ResvItem::Word(v),
+            });
+        }
+
         let (entry_block_id, addr) = self.blocks.get_entry();
         self.blocks
             .set_entry((self.block_id_mapping[&entry_block_id], addr));
+
+        let (entry_resv_id, addr) = self.blocks.get_main_resv();
+        self.blocks
+            .set_main_resv((self.block_id_mapping[&entry_resv_id], addr));
     }
 }
 
@@ -115,22 +133,21 @@ impl CodeBlockOptimser {
 
     fn simplify_opcode(&mut self, destination: Register, opcode: OpcodeKind) -> Option<OpcodeKind> {
         let new_op = match opcode {
-            OpcodeKind::Add(reg, value) => self.simplify_add(destination, reg, value)?,
-            OpcodeKind::Call(addr) => OpcodeKind::Call(self.simplify_address(addr)),
+            OpcodeKind::Call(addr, value) => {
+                OpcodeKind::Call(self.simplify_address(addr), self.simplify_value(value))
+            }
+            OpcodeKind::CheckInputs(reg, i, o) => {
+                OpcodeKind::CheckInputs(self.simplify_register(reg), i, o)
+            }
             OpcodeKind::Load(value) => self.simplify_load(destination, value)?,
-            OpcodeKind::Mul(reg, value) => self.simplify_mul(destination, reg, value)?,
-            OpcodeKind::Pop => OpcodeKind::Pop,
-            OpcodeKind::Push(value) => OpcodeKind::Push(self.simplify_value(value)),
+            OpcodeKind::LoadResv => OpcodeKind::LoadResv,
+            OpcodeKind::Offset { .. } => self.simplify_offset(destination, opcode)?,
             OpcodeKind::Read(addr) => OpcodeKind::Read(self.simplify_address(addr)),
             OpcodeKind::ReadBits(addr, s, e) => {
                 OpcodeKind::ReadBits(self.simplify_address(addr), s, e)
             }
             OpcodeKind::ReadOffset(addr, offset) => {
-                OpcodeKind::ReadOffset(self.simplify_address(addr), self.simplify_value(offset))
-            }
-            OpcodeKind::Return => OpcodeKind::Return,
-            OpcodeKind::Write(addr, value) => {
-                OpcodeKind::Write(self.simplify_address(addr), self.simplify_value(value))
+                OpcodeKind::ReadOffset(self.simplify_address(addr), offset)
             }
             OpcodeKind::WriteBits(addr, reg, s, e) => OpcodeKind::WriteBits(
                 self.simplify_address(addr),
@@ -138,21 +155,19 @@ impl CodeBlockOptimser {
                 s,
                 e,
             ),
-            OpcodeKind::WriteOffset(addr, reg, offset) => OpcodeKind::WriteOffset(
+            OpcodeKind::WriteOffset(addr, value, offset) => OpcodeKind::WriteOffset(
                 self.simplify_address(addr),
-                self.simplify_register(reg),
-                self.simplify_value(offset),
+                self.simplify_value(value),
+                offset,
             ),
         };
 
         let duplicate_of_reg = match new_op {
-            OpcodeKind::Add(reg, Value::Immediate(Constant::Value(0))) => Some(reg),
-            OpcodeKind::Mul(_, Value::Immediate(Constant::Value(0))) => {
-                self.constant_registers
-                    .insert(destination, Constant::Value(0));
-                return None;
-            }
-            OpcodeKind::Mul(reg, Value::Immediate(Constant::Value(1))) => Some(reg),
+            OpcodeKind::Offset {
+                base: Address::Register(base_reg),
+                item_size,
+                item_count: Value::Immediate(Constant::Value(x)),
+            } if item_size * x == 0 => Some(base_reg),
             _ => None,
         };
 
@@ -162,9 +177,7 @@ impl CodeBlockOptimser {
         };
 
         let can_be_eliminated = match new_op {
-            OpcodeKind::Add(_, Value::Immediate(..) | Value::Register(..)) => true,
             OpcodeKind::Load(..) => true,
-            OpcodeKind::Mul(_, Value::Immediate(..) | Value::Register(..)) => true,
             _ => false,
         };
 
@@ -180,76 +193,42 @@ impl CodeBlockOptimser {
         Some(new_op)
     }
 
-    fn simplify_add(
-        &mut self,
-        destination: Register,
-        reg: Register,
-        value: Value,
-    ) -> Option<OpcodeKind> {
-        if let Value::Immediate(v) = value {
-            if let Value::Immediate(x) = self.simplify_register_maybe_value(reg) {
-                let value = match (v, x) {
-                    (Constant::Value(x), Constant::Value(y)) => Constant::Value(x + y),
-                    (Constant::Address((xb, xa)), Constant::Address((yb, ya))) => {
-                        assert_eq!(xb, yb);
-                        Constant::Address((xb, xa + ya))
-                    }
-                    (Constant::Address((blk, x)), Constant::Value(y)) => {
-                        Constant::Address((blk, x + y))
-                    }
-                    (Constant::Value(x), Constant::Address((blk, y))) => {
-                        Constant::Address((blk, x + y))
-                    }
+    fn simplify_offset(&mut self, dest: Register, opcode: OpcodeKind) -> Option<OpcodeKind> {
+        match opcode {
+            OpcodeKind::Offset {
+                base: Address::Immediate((blk, addr)),
+                item_size,
+                item_count: Value::Immediate(c),
+            } => {
+                let value = match c {
+                    Constant::Address(_) => unreachable!(),
+                    Constant::Value(v) => Constant::Address((blk, addr + v * item_size)),
                 };
 
-                self.constant_registers.insert(destination, value);
+                self.constant_registers.insert(dest, value);
                 return None;
             }
+            OpcodeKind::Offset {
+                base,
+                item_size,
+                item_count,
+            } => {
+                let base = self.simplify_address(base);
+                let item_count = self.simplify_value(item_count);
+                Some(OpcodeKind::Offset {
+                    base,
+                    item_size,
+                    item_count,
+                })
+            }
+            _ => unreachable!(),
         }
-
-        Some(OpcodeKind::Add(
-            self.simplify_register(reg),
-            self.simplify_value(value),
-        ))
     }
 
     fn simplify_load(&mut self, destination: Register, value: Constant) -> Option<OpcodeKind> {
         self.constant_registers.insert(destination, value);
         // TODO: improve optimisation here so unused constant registers get removed
         Some(OpcodeKind::Load(value))
-    }
-
-    fn simplify_mul(
-        &mut self,
-        destination: Register,
-        reg: Register,
-        value: Value,
-    ) -> Option<OpcodeKind> {
-        if let Value::Immediate(v) = value {
-            if let Value::Immediate(x) = self.simplify_register_maybe_value(reg) {
-                let value = match (v, x) {
-                    (Constant::Value(x), Constant::Value(y)) => Constant::Value(x * y),
-                    (Constant::Address((xb, xa)), Constant::Address((yb, ya))) => {
-                        assert_eq!(xb, yb);
-                        Constant::Address((xb, xa * ya))
-                    }
-                    (Constant::Address((blk, x)), Constant::Value(y)) => {
-                        Constant::Address((blk, x * y))
-                    }
-                    (Constant::Value(x), Constant::Address((blk, y))) => {
-                        Constant::Address((blk, x * y))
-                    }
-                };
-
-                self.constant_registers.insert(destination, value);
-                return None;
-            }
-        }
-
-        Some(OpcodeKind::Mul(
-            self.simplify_register(reg),
-            self.simplify_value(value),
-        ))
     }
 
     fn simplify_register(&self, register: Register) -> Register {
@@ -290,36 +269,36 @@ impl CodeBlockOptimser {
 
     fn update_register_numbers(m: &HashMap<usize, usize>, opcode: OpcodeKind) -> OpcodeKind {
         match opcode {
-            OpcodeKind::Add(r, v) => {
-                OpcodeKind::Add(m[&r], Self::update_register_number_in_value(m, v))
-            }
-            OpcodeKind::Call(a) => OpcodeKind::Call(Self::update_register_number_in_address(m, a)),
+            OpcodeKind::Call(a, v) => OpcodeKind::Call(
+                Self::update_register_number_in_address(m, a),
+                Self::update_register_number_in_value(m, v),
+            ),
+            OpcodeKind::CheckInputs(r, i, o) => OpcodeKind::CheckInputs(m[&r], i, o),
             OpcodeKind::Load(c) => OpcodeKind::Load(c),
-            OpcodeKind::Mul(r, v) => {
-                OpcodeKind::Mul(m[&r], Self::update_register_number_in_value(m, v))
-            }
-            OpcodeKind::Pop => OpcodeKind::Pop,
-            OpcodeKind::Push(v) => OpcodeKind::Push(Self::update_register_number_in_value(m, v)),
+            OpcodeKind::LoadResv => OpcodeKind::LoadResv,
+            OpcodeKind::Offset {
+                base,
+                item_size,
+                item_count,
+            } => OpcodeKind::Offset {
+                base: Self::update_register_number_in_address(m, base),
+                item_size,
+                item_count: Self::update_register_number_in_value(m, item_count),
+            },
             OpcodeKind::Read(a) => OpcodeKind::Read(Self::update_register_number_in_address(m, a)),
             OpcodeKind::ReadBits(a, s, e) => {
                 OpcodeKind::ReadBits(Self::update_register_number_in_address(m, a), s, e)
             }
-            OpcodeKind::ReadOffset(a, v) => OpcodeKind::ReadOffset(
-                Self::update_register_number_in_address(m, a),
-                Self::update_register_number_in_value(m, v),
-            ),
-            OpcodeKind::Return => OpcodeKind::Return,
-            OpcodeKind::Write(a, v) => OpcodeKind::Write(
-                Self::update_register_number_in_address(m, a),
-                Self::update_register_number_in_value(m, v),
-            ),
+            OpcodeKind::ReadOffset(a, v) => {
+                OpcodeKind::ReadOffset(Self::update_register_number_in_address(m, a), v)
+            }
             OpcodeKind::WriteBits(a, r, s, e) => {
                 OpcodeKind::WriteBits(Self::update_register_number_in_address(m, a), m[&r], s, e)
             }
-            OpcodeKind::WriteOffset(a, r, v) => OpcodeKind::WriteOffset(
+            OpcodeKind::WriteOffset(a, v, offset) => OpcodeKind::WriteOffset(
                 Self::update_register_number_in_address(m, a),
-                m[&r],
                 Self::update_register_number_in_value(m, v),
+                offset,
             ),
         }
     }
@@ -341,33 +320,35 @@ impl CodeBlockOptimser {
 
     fn remap_blocks(m: &HashMap<usize, usize>, opcode: OpcodeKind) -> OpcodeKind {
         match opcode {
-            OpcodeKind::Add(r, v) => OpcodeKind::Add(r, Self::remap_blocks_in_value(m, v)),
-            OpcodeKind::Call(a) => OpcodeKind::Call(Self::remap_blocks_in_address(m, a)),
+            OpcodeKind::Call(a, v) => OpcodeKind::Call(
+                Self::remap_blocks_in_address(m, a),
+                Self::remap_blocks_in_value(m, v),
+            ),
+            OpcodeKind::CheckInputs(r, i, o) => OpcodeKind::CheckInputs(r, i, o),
             OpcodeKind::Load(c) => OpcodeKind::Load(Self::remap_blocks_in_constant(m, c)),
-            OpcodeKind::Mul(r, v) => OpcodeKind::Mul(r, Self::remap_blocks_in_value(m, v)),
-            OpcodeKind::Pop => OpcodeKind::Pop,
-            OpcodeKind::Push(v) => OpcodeKind::Push(Self::remap_blocks_in_value(m, v)),
+            OpcodeKind::LoadResv => OpcodeKind::LoadResv,
+            OpcodeKind::Offset {
+                base,
+                item_size,
+                item_count,
+            } => OpcodeKind::Offset {
+                base: Self::remap_blocks_in_address(m, base),
+                item_size,
+                item_count: Self::remap_blocks_in_value(m, item_count),
+            },
             OpcodeKind::Read(a) => OpcodeKind::Read(Self::remap_blocks_in_address(m, a)),
             OpcodeKind::ReadBits(a, s, e) => {
                 OpcodeKind::ReadBits(Self::remap_blocks_in_address(m, a), s, e)
             }
-            OpcodeKind::ReadOffset(a, v) => OpcodeKind::ReadOffset(
-                Self::remap_blocks_in_address(m, a),
-                Self::remap_blocks_in_value(m, v),
-            ),
-            OpcodeKind::Return => OpcodeKind::Return,
-            OpcodeKind::Write(a, v) => OpcodeKind::Write(
-                Self::remap_blocks_in_address(m, a),
-                Self::remap_blocks_in_value(m, v),
-            ),
+            OpcodeKind::ReadOffset(a, v) => {
+                OpcodeKind::ReadOffset(Self::remap_blocks_in_address(m, a), v)
+            }
             OpcodeKind::WriteBits(a, r, s, e) => {
                 OpcodeKind::WriteBits(Self::remap_blocks_in_address(m, a), r, s, e)
             }
-            OpcodeKind::WriteOffset(a, r, v) => OpcodeKind::WriteOffset(
-                Self::remap_blocks_in_address(m, a),
-                r,
-                Self::remap_blocks_in_value(m, v),
-            ),
+            OpcodeKind::WriteOffset(a, r, v) => {
+                OpcodeKind::WriteOffset(Self::remap_blocks_in_address(m, a), r, v)
+            }
         }
     }
 

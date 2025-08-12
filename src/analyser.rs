@@ -378,7 +378,6 @@ impl Analyser {
         };
 
         self.import_stack.push(module_id);
-        dbg!(&ast);
         self.evaluate_items(&mut ctx, ast.into_iter())?;
         self.import_stack.pop();
 
@@ -1737,7 +1736,6 @@ impl Analyser {
         circ: &mut CircBuilder,
         node: &Node,
     ) -> Result<(), Diagnostics> {
-        dbg!(&node);
         let (mut lhs, direction, mut rhs) = extract!(
             node.node_type(),
             NodeType::Connection {

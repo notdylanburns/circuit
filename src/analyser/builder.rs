@@ -340,13 +340,8 @@ impl CircBuilder {
         let dependency_start_indicies = dependencies
             .clone()
             .enumerate()
-            .inspect(|x| {
-                dbg!(x);
-            })
             .filter_map(|(start, (name, i, _))| if i == 0 { Some((name, start)) } else { None })
             .collect::<HashMap<_, _>>();
-
-        dbg!(&dependency_start_indicies);
 
         let dependencies = dependencies
             .map(|(_, _, circ_id)| circ_id)

@@ -119,8 +119,6 @@ impl TreeTable {
             row[index] = inputs[endpoint];
         }
 
-        dbg!(&row);
-
         BitString::from(&row[..])
     }
 
@@ -195,7 +193,6 @@ impl TreeTable {
 
         for row in 0..result.row_count() {
             let row_inputs = BitString::from_value(row as u128, result.inputs.len());
-            dbg!(&row_inputs);
             let mut mapped_inputs = vec![Value::Z; self.inputs.len()];
 
             for (target_index, mapping) in input_mapping.iter() {
@@ -219,10 +216,7 @@ impl TreeTable {
                 mapped_inputs[*target_index] = new_value;
             }
 
-            dbg!(&mapped_inputs);
-
             let result_row = self.query(BitString::from(&mapped_inputs[..]));
-            dbg!(&result_row);
 
             result.rows[row] = result_row;
         }
@@ -568,8 +562,6 @@ impl<'a> TruthTableOptimiser<'a> {
             );
         }
 
-        dbg!(&dependency_inputs);
-
         let bit_connections = bit_connections.into_iter().collect::<Vec<_>>();
 
         let mut endpoint_inbound_connection_ids = HashMap::new();
@@ -617,8 +609,6 @@ impl<'a> TruthTableOptimiser<'a> {
         ctx: &mut TruthTableContext,
         connection_trees: Vec<(BitEndpointId, Rc<ConnectionTree>)>,
     ) -> Option<TruthTable> {
-        dbg!(&connection_trees);
-
         let tree_tables = connection_trees
             .into_iter()
             .map(|(endpoint_id, ct)| {
@@ -630,8 +620,6 @@ impl<'a> TruthTableOptimiser<'a> {
                 }
             })
             .collect::<Option<HashMap<BitEndpoint, Rc<TreeTable>>>>()?;
-
-        dbg!(&tree_tables);
 
         Some(TruthTable::from_tree_tables(tree_tables))
     }
@@ -680,8 +668,6 @@ impl<'a> TruthTableOptimiser<'a> {
 
                     let tt = self.get_tree_table(ctx, tree.clone())?;
                     input_mapping.insert(*dep_input, Some(tt));
-
-                    dbg!(&tree);
                 }
 
                 tt.map_inputs(input_mapping)
@@ -690,8 +676,6 @@ impl<'a> TruthTableOptimiser<'a> {
         };
 
         let tt = Rc::new(tt);
-
-        dbg!(&tt);
 
         ctx.tree_table_cache.insert(tree.clone(), tt.clone());
 
