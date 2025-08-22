@@ -55,6 +55,16 @@ impl PartialEq for ConstType {
     }
 }
 
+impl From<circuit_extlib::ConstType> for ConstType {
+    fn from(value: circuit_extlib::ConstType) -> Self {
+        match value {
+            circuit_extlib::ConstType::Int => ConstType::Int,
+            circuit_extlib::ConstType::Bool => ConstType::Bool,
+            circuit_extlib::ConstType::Enum => todo!(),
+        }
+    }
+}
+
 #[derive(Debug, Eq, PartialEq, Copy, Clone, Hash)]
 pub(super) enum ConstValue {
     Unknown,
@@ -95,5 +105,14 @@ impl ConstValue {
 
     pub fn is_known(&self) -> bool {
         !self.is_unknown()
+    }
+
+    pub fn from_extracted_const(value: &circuit_extlib::rust::ExtractedConst) -> Option<Self> {
+        match value {
+            circuit_extlib::rust::ExtractedConst::None => None,
+            circuit_extlib::rust::ExtractedConst::Bool(b) => Some(Self::Bool(*b)),
+            circuit_extlib::rust::ExtractedConst::EnumValue(_) => todo!(),
+            circuit_extlib::rust::ExtractedConst::Int(i) => Some(Self::Int(*i)),
+        }
     }
 }

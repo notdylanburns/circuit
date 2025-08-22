@@ -1,7 +1,7 @@
 use crate::{
     ansi::{self, AnsiColourType, AnsiModify},
-    loader::Loader,
-    util::{Pos, Position},
+    loader::{Loader, Module},
+    util::{LibrarySymbolType, Pos, Position},
 };
 use std::fmt::Write;
 
@@ -184,8 +184,14 @@ impl Diagnostic {
 
         write!(f, "{}{}", bold, module.path_str())?;
 
-        match self.ctx.pos.loc() {
-            Some((line, col)) => writeln!(f, ":{}:{} ", line + 1, col + 1)?,
+        match self.pos() {
+            Pos::Pos { line, col, .. } => writeln!(f, ":{}:{} ", line + 1, col + 1)?,
+            Pos::Library(_, t, n) => match t {
+                LibrarySymbolType::Circ => writeln!(f, " CIRCS[{n}]"),
+                LibrarySymbolType::Const => writeln!(f, " CONSTS[{n}]"),
+                LibrarySymbolType::Enum => writeln!(f, " ENUMS[{n}]"),
+                LibrarySymbolType::Library => writeln!(f, " LIBS[{n}]"),
+            }?,
             _ => writeln!(f, "")?,
         };
 
@@ -201,115 +207,123 @@ impl Diagnostic {
             self.diagnostic
         )?;
 
-        let Pos::Pos {
-            line, col, span, ..
-        } = self.pos()
-        else {
-            return Ok(string);
-        };
+        // TODO: improve diagnostics
 
-        let line_no_length = f64::log10(line as f64) as usize + 2;
-        let pad = usize::max(line_no_length, 4);
-        let barpad = pad + 2;
+        // if let Pos::Pos {
+        //     line, col, span, ..
+        // } = self.pos()
+        // {
+        //     let Module::Module(module) = module else {
+        //         unreachable!()
+        //     };
 
-        let line_style = style!(bold).fg(ansi::BLUE);
-        writeln!(f, "{:>barpad$}", "|".apply(line_style))?;
+        //     let line_no_length = f64::log10(line as f64) as usize + 2;
+        //     let pad = usize::max(line_no_length, 4);
+        //     let barpad = pad + 2;
 
-        let line_str = module.read_line(line).expect("failed to read module");
+        //     let line_style = style!(bold).fg(ansi::BLUE);
+        //     writeln!(f, "{:>barpad$}", "|".apply(line_style))?;
 
-        writeln!(
-            f,
-            "{:>pad$} {} {}{}{}",
-            (line + 1).apply(line_style),
-            "|".apply(line_style),
-            &line_str[..col],
-            &line_str[col..col + span].fg(self.kind.colour()),
-            &line_str[col + span..],
-        )?;
+        //     let line_str = module.read_line(line).expect("failed to read module");
 
-        writeln!(
-            f,
-            "{:>barpad$} {:>col$}{}{:~>span$}{}",
-            "|".apply(line_style),
-            "",
-            style!().fg(self.kind.colour()),
-            "",
-            style!().fg(ansi::RESET),
-        )?;
+        //     writeln!(
+        //         f,
+        //         "{:>pad$} {} {}{}{}",
+        //         (line + 1).apply(line_style),
+        //         "|".apply(line_style),
+        //         &line_str[..col],
+        //         &line_str[col..col + span].fg(self.kind.colour()),
+        //         &line_str[col + span..],
+        //     )?;
 
-        let note_style = style!(bold).fg(ansi::MAGENTA);
+        //     writeln!(
+        //         f,
+        //         "{:>barpad$} {:>col$}{}{:~>span$}{}",
+        //         "|".apply(line_style),
+        //         "",
+        //         style!().fg(self.kind.colour()),
+        //         "",
+        //         style!().fg(ansi::RESET),
+        //     )?;
+        // };
 
-        for note in self.notes.iter() {
-            writeln!(
-                f,
-                "{:>barpad$}",
-                "---".apply(note_style),
-                barpad = barpad + 1
-            )?;
-            writeln!(
-                f,
-                "{:>barpad$} {}: {}",
-                "+".apply(note_style),
-                note.kind
-                    .as_str()
-                    .fg(note.kind.colour())
-                    .apply(style!(bold)),
-                note.diagnostic
-            )?;
+        // let note_style = style!(bold).fg(ansi::MAGENTA);
 
-            let Some(note_module_id) = note.ctx.pos.module_id() else {
-                continue;
-            };
+        // for note in self.notes.iter() {
+        //     let line_no_length = f64::log10(line as f64) as usize + 2;
+        //     let pad = usize::max(line_no_length, 4);
+        //     let barpad = pad + 2;
 
-            let module = loader
-                .get_module_mut(note_module_id)
-                .unwrap_or_else(|| unreachable!("invalid module in diagnostics: {note_module_id}"));
+        //     writeln!(
+        //         f,
+        //         "{:>barpad$}",
+        //         "---".apply(note_style),
+        //         barpad = barpad + 1
+        //     )?;
+        //     writeln!(
+        //         f,
+        //         "{:>barpad$} {}: {}",
+        //         "+".apply(note_style),
+        //         note.kind
+        //             .as_str()
+        //             .fg(note.kind.colour())
+        //             .apply(style!(bold)),
+        //         note.diagnostic
+        //     )?;
 
-            if note_module_id != module_id {
-                write!(
-                    f,
-                    "{:>barpad$} == {}",
-                    "+".apply(note_style),
-                    module.path_str(),
-                )?;
+        //     let Some(note_module_id) = note.ctx.pos.module_id() else {
+        //         continue;
+        //     };
 
-                match note.ctx.pos.loc() {
-                    Some((line, col)) => writeln!(f, ":{}:{} ==", line + 1, col + 1)?,
-                    _ => writeln!(f, "==")?,
-                };
-            };
+        //     let module = loader
+        //         .get_module_mut(note_module_id)
+        //         .unwrap_or_else(|| unreachable!("invalid module in diagnostics: {note_module_id}"));
 
-            let Pos::Pos {
-                line, col, span, ..
-            } = note.ctx.pos
-            else {
-                continue;
-            };
+        //     if note_module_id != module_id {
+        //         write!(
+        //             f,
+        //             "{:>barpad$} == {}",
+        //             "+".apply(note_style),
+        //             module.path_str(),
+        //         )?;
 
-            writeln!(f, "{:>barpad$}", "|".apply(line_style))?;
+        //         match note.ctx.pos.loc() {
+        //             Some((line, col)) => writeln!(f, ":{}:{} ==", line + 1, col + 1)?,
+        //             _ => writeln!(f, "==")?,
+        //         };
+        //     };
 
-            let line_str = module.read_line(line).expect("failed to read module");
+        //     let Pos::Pos {
+        //         line, col, span, ..
+        //     } = note.ctx.pos
+        //     else {
+        //         continue;
+        //     };
 
-            writeln!(
-                f,
-                "{:>pad$} {} {}{}{}",
-                (line + 1).apply(line_style),
-                "|".apply(line_style),
-                &line_str[..col],
-                &line_str[col..col + span].fg(note.kind.colour()),
-                &line_str[col + span..],
-            )?;
+        //     writeln!(f, "{:>barpad$}", "|".apply(line_style))?;
 
-            writeln!(
-                f,
-                "{:>barpad$} {:>col$}{}{:~>span$}{}",
-                "|".apply(line_style),
-                "",
-                style!().fg(note.kind.colour()),
-                "",
-                style!().fg(ansi::RESET),
-            )?;
-        }
+        //     let line_str = module.read_line(line).expect("failed to read module");
+
+        //     writeln!(
+        //         f,
+        //         "{:>pad$} {} {}{}{}",
+        //         (line + 1).apply(line_style),
+        //         "|".apply(line_style),
+        //         &line_str[..col],
+        //         &line_str[col..col + span].fg(note.kind.colour()),
+        //         &line_str[col + span..],
+        //     )?;
+
+        //     writeln!(
+        //         f,
+        //         "{:>barpad$} {:>col$}{}{:~>span$}{}",
+        //         "|".apply(line_style),
+        //         "",
+        //         style!().fg(note.kind.colour()),
+        //         "",
+        //         style!().fg(ansi::RESET),
+        //     )?;
+        // }
 
         return Ok(string);
     }

@@ -71,6 +71,8 @@ string_enum! {
         Import("import"),
         If("if"),
         Else("else"),
+        Use("use"),
+        As("as"),
     }
 }
 
@@ -378,7 +380,7 @@ impl<'i> Tokeniser<'i> {
         }
 
         if diagnostics.has_errors() {
-            return Err(diagnostics);
+            Err(diagnostics)
         } else {
             Ok(TokeniserResult {
                 module_id: self.module_id,

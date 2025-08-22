@@ -1,5 +1,5 @@
 use crate::loader::ModuleId;
-use crate::tokeniser::{punctuation, IdentId, PunctuationType, Token, TokenType};
+use crate::tokeniser::{punctuation, IdentId, PunctuationType, TokenType};
 use crate::util::{Pos, Position};
 
 #[derive(Debug)]
@@ -8,6 +8,7 @@ pub struct AST {
     nodes: Vec<Node>,
 }
 
+#[allow(dead_code)]
 impl AST {
     pub fn new(module: ModuleId) -> Self {
         Self {
@@ -306,6 +307,10 @@ pub enum NodeType {
         decls: Vec<Node>,
     },
     With(Vec<Node>),
+    Use {
+        path: Box<Node>,
+        as_name: Option<Box<Node>>,
+    },
 }
 
 #[derive(Debug)]

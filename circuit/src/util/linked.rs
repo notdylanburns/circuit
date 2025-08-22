@@ -11,7 +11,7 @@ impl<'a, T> LinkedStack<'a, T> {
     pub fn push(&'a self, item: T) -> Self {
         Self {
             parent: Some(self),
-            item: item,
+            item,
         }
     }
 

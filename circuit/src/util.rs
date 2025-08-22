@@ -8,15 +8,23 @@ mod interner;
 pub use interner::Interner;
 
 mod linked;
-pub use linked::LinkedStack;
 
 use crate::loader::ModuleId;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LibrarySymbolType {
+    Circ,
+    Const,
+    Enum,
+    Library,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Pos {
     None,
     Builtin,
     Module(ModuleId),
+    Library(ModuleId, LibrarySymbolType, usize),
     Pos {
         module_id: ModuleId,
         line: usize,
@@ -52,7 +60,7 @@ impl Pos {
     pub fn module_id(&self) -> Option<ModuleId> {
         match self {
             Self::Builtin | Self::None => None,
-            Self::Module(module_id) => Some(*module_id),
+            Self::Module(module_id) | Self::Library(module_id, ..) => Some(*module_id),
             Self::Pos { module_id, .. } => Some(*module_id),
         }
     }
@@ -288,10 +296,10 @@ pub fn div_up(a: usize, b: usize) -> usize {
 }
 
 pub fn invert_hashmap<K, V: Eq + Hash>(hm: HashMap<K, V>) -> HashMap<V, Vec<K>> {
-    let mut new = HashMap::new();
+    let mut new = HashMap::<V, Vec<K>>::new();
 
     for (k, v) in hm {
-        new.entry(v).or_insert(vec![]).push(k);
+        new.entry(v).or_default().push(k);
     }
 
     new
@@ -314,6 +322,41 @@ where
     }
 
     row_vec
+}
+
+fn print_cmd(cmd: &std::process::Command) {
+    let cmd = std::iter::once(cmd.get_program())
+        .chain(cmd.get_args())
+        .map(|arg| arg.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    println!("[INFO] {cmd}")
+}
+
+pub fn run_cmd(cmd: &mut std::process::Command) {
+    print_cmd(cmd);
+    let prog = cmd.get_program().to_str().unwrap().to_string();
+
+    let status = cmd
+        .spawn()
+        .unwrap_or_else(|_| {
+            eprintln!("[FATAL] failed to spawn '{prog}' process");
+            std::process::exit(1);
+        })
+        .wait()
+        .unwrap_or_else(|_| {
+            eprintln!("[FATAL] failed to wait for '{prog}' process");
+            std::process::exit(1);
+        });
+
+    if !status.success() {
+        match status.code() {
+            Some(code) => eprintln!("[FATAL] '{prog}' failed with exit code: {code}"),
+            None => eprintln!("[FATAL] '{prog}' terminated by signal"),
+        }
+        std::process::exit(1);
+    };
 }
 
 pub(super) use {difference, extract};

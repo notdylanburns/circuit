@@ -1,46 +1,51 @@
-use crate::codegen::blocks::Block;
 use crate::codegen::targets::ir::{
-    Address, Constant, IrBlocks, Opcode, OpcodeKind, Register, ResvItem, Value,
+    blocks::Block, Address, Constant, DataItem, Opcode, OpcodeKind, Register, Sections, Value,
+    WordTrait,
 };
 
 use std::collections::HashMap;
 
-pub struct IrOptimiser {
-    blocks: IrBlocks,
+pub struct IrOptimiser<Word: WordTrait> {
+    sections: Sections<Word>,
     block_id_mapping: HashMap<usize, usize>,
 }
 
-impl IrOptimiser {
-    pub fn optimise(blocks: IrBlocks) -> IrBlocks {
+impl<Word: WordTrait> IrOptimiser<Word> {
+    pub fn optimise(sections: Sections<Word>) -> Sections<Word> {
         let mut optimiser = Self {
-            blocks: IrBlocks::default(),
+            sections: Sections::default(),
             block_id_mapping: HashMap::new(),
         };
 
-        optimiser.blocks.set_entry(blocks.get_entry());
-        optimiser.blocks.set_main_resv(blocks.get_main_resv());
-
-        for block in blocks.resv_blocks() {
-            let new_id = optimiser.blocks.push_resv(block.items().to_vec());
+        for block in sections.data_blocks() {
+            let new_id = optimiser.sections.push_data(block.items().to_vec());
             optimiser.block_id_mapping.insert(block.id, new_id);
         }
-        optimiser.deduplicate_data_blocks(&blocks);
-        optimiser.optimise_code_blocks(&blocks);
+
+        for block in sections.strtab_blocks() {
+            let new_id = optimiser.sections.push_strtab(block.items().to_vec());
+            optimiser.block_id_mapping.insert(block.id, new_id);
+        }
+
+        optimiser.deduplicate_rodata_blocks(&sections);
+        optimiser.optimise_code_blocks(&sections);
+
+        optimiser.sections.labels = sections.labels;
 
         optimiser.remap_blocks();
 
-        optimiser.blocks
+        optimiser.sections
     }
 
-    fn optimise_code_blocks(&mut self, blocks: &IrBlocks) {
+    fn optimise_code_blocks(&mut self, blocks: &Sections<Word>) {
         let mut deduped_blocks = HashMap::new();
 
-        for block in blocks.code_blocks() {
+        for block in blocks.text_blocks() {
             let new_opcodes = CodeBlockOptimser::optimise(block);
             if let Some(block_id) = deduped_blocks.get(&new_opcodes) {
                 self.block_id_mapping.insert(block.id, *block_id);
             } else {
-                let new_block = self.blocks.new_code();
+                let new_block = self.sections.new_text();
                 new_block.extend(&new_opcodes);
                 deduped_blocks.insert(new_opcodes, new_block.id);
                 self.block_id_mapping.insert(block.id, new_block.id);
@@ -48,15 +53,15 @@ impl IrOptimiser {
         }
     }
 
-    fn deduplicate_data_blocks(&mut self, blocks: &IrBlocks) {
+    fn deduplicate_rodata_blocks(&mut self, blocks: &Sections<Word>) {
         let mut duplicate_blocks = HashMap::new();
 
-        for block in blocks.data_blocks() {
+        for block in blocks.rodata_blocks() {
             let items = block.items();
             if let Some(block_id) = duplicate_blocks.get(items) {
                 self.block_id_mapping.insert(block.id, *block_id);
             } else {
-                let new_block = self.blocks.new_data();
+                let new_block = self.sections.new_rodata();
                 new_block.extend(items);
                 duplicate_blocks.insert(new_block.items().to_vec(), new_block.id);
                 self.block_id_mapping.insert(block.id, new_block.id);
@@ -65,40 +70,37 @@ impl IrOptimiser {
     }
 
     fn remap_blocks(&mut self) {
-        for code_block in self.blocks.code_blocks_mut() {
+        for code_block in self.sections.text_blocks_mut() {
             code_block.map_items(|opc| Opcode {
                 destination: opc.destination,
                 opcode: CodeBlockOptimser::remap_blocks(&self.block_id_mapping, opc.opcode),
             })
         }
 
-        for resv_block in self.blocks.resv_blocks_mut() {
+        for resv_block in self.sections.data_blocks_mut() {
             resv_block.map_items(|&c| match c {
-                ResvItem::BlockAddress((blk, addr)) => {
-                    ResvItem::BlockAddress((self.block_id_mapping[&blk], addr))
+                DataItem::Address((blk, addr)) => {
+                    DataItem::Address((self.block_id_mapping[&blk], addr))
                 }
-                ResvItem::Word(v) => ResvItem::Word(v),
+                DataItem::Word(v) => DataItem::Word(v),
             });
         }
 
-        let (entry_block_id, addr) = self.blocks.get_entry();
-        self.blocks
-            .set_entry((self.block_id_mapping[&entry_block_id], addr));
-
-        let (entry_resv_id, addr) = self.blocks.get_main_resv();
-        self.blocks
-            .set_main_resv((self.block_id_mapping[&entry_resv_id], addr));
+        self.sections.labels.values_mut().for_each(|addr| {
+            let (blk, a) = addr;
+            *addr = (self.block_id_mapping[blk], *a);
+        });
     }
 }
 
-struct CodeBlockOptimser {
-    duplicate_instructions: HashMap<OpcodeKind, Register>,
-    constant_registers: HashMap<Register, Constant>,
+struct CodeBlockOptimser<Word: WordTrait> {
+    duplicate_instructions: HashMap<OpcodeKind<Word>, Register>,
+    constant_registers: HashMap<Register, Constant<Word>>,
     duplicate_registers: HashMap<Register, Register>,
 }
 
-impl CodeBlockOptimser {
-    fn optimise(source: &Block<Opcode>) -> Vec<Opcode> {
+impl<Word: WordTrait> CodeBlockOptimser<Word> {
+    fn optimise(source: &Block<Opcode<Word>>) -> Vec<Opcode<Word>> {
         let mut optimiser = Self {
             duplicate_instructions: HashMap::new(),
             constant_registers: HashMap::new(),
@@ -124,18 +126,28 @@ impl CodeBlockOptimser {
                     opcode: Self::update_register_numbers(&register_mapping, opc),
                 }
             })
-            .collect::<Vec<Opcode>>();
+            .collect::<Vec<Opcode<Word>>>();
 
         // TODO: reorder opcodes to only calculcate registers just before they are needed
 
         new_instructions
     }
 
-    fn simplify_opcode(&mut self, destination: Register, opcode: OpcodeKind) -> Option<OpcodeKind> {
+    fn simplify_opcode(
+        &mut self,
+        destination: Register,
+        opcode: OpcodeKind<Word>,
+    ) -> Option<OpcodeKind<Word>> {
         let new_op = match opcode {
             OpcodeKind::Call(addr, value) => {
                 OpcodeKind::Call(self.simplify_address(addr), self.simplify_value(value))
             }
+            OpcodeKind::CallLibrary(c, r, i, o) => OpcodeKind::CallLibrary(
+                c,
+                self.simplify_register(r),
+                self.simplify_register(i),
+                self.simplify_register(o),
+            ),
             OpcodeKind::CheckInputs(reg, i, o) => {
                 OpcodeKind::CheckInputs(self.simplify_register(reg), i, o)
             }
@@ -167,7 +179,7 @@ impl CodeBlockOptimser {
                 base: Address::Register(base_reg),
                 item_size,
                 item_count: Value::Immediate(Constant::Value(x)),
-            } if item_size * x == 0 => Some(base_reg),
+            } if x.offset(0, item_size) == 0 => Some(base_reg),
             _ => None,
         };
 
@@ -178,6 +190,7 @@ impl CodeBlockOptimser {
 
         let can_be_eliminated = match new_op {
             OpcodeKind::Load(..) => true,
+            OpcodeKind::Offset { .. } => true,
             _ => false,
         };
 
@@ -193,7 +206,11 @@ impl CodeBlockOptimser {
         Some(new_op)
     }
 
-    fn simplify_offset(&mut self, dest: Register, opcode: OpcodeKind) -> Option<OpcodeKind> {
+    fn simplify_offset(
+        &mut self,
+        dest: Register,
+        opcode: OpcodeKind<Word>,
+    ) -> Option<OpcodeKind<Word>> {
         match opcode {
             OpcodeKind::Offset {
                 base: Address::Immediate((blk, addr)),
@@ -202,11 +219,11 @@ impl CodeBlockOptimser {
             } => {
                 let value = match c {
                     Constant::Address(_) => unreachable!(),
-                    Constant::Value(v) => Constant::Address((blk, addr + v * item_size)),
+                    Constant::Value(v) => Constant::Address((blk, v.offset(addr, item_size))),
                 };
 
                 self.constant_registers.insert(dest, value);
-                return None;
+                None
             }
             OpcodeKind::Offset {
                 base,
@@ -225,7 +242,11 @@ impl CodeBlockOptimser {
         }
     }
 
-    fn simplify_load(&mut self, destination: Register, value: Constant) -> Option<OpcodeKind> {
+    fn simplify_load(
+        &mut self,
+        destination: Register,
+        value: Constant<Word>,
+    ) -> Option<OpcodeKind<Word>> {
         self.constant_registers.insert(destination, value);
         // TODO: improve optimisation here so unused constant registers get removed
         Some(OpcodeKind::Load(value))
@@ -239,7 +260,7 @@ impl CodeBlockOptimser {
         }
     }
 
-    fn simplify_register_maybe_value(&self, register: Register) -> Value {
+    fn simplify_register_maybe_value(&self, register: Register) -> Value<Word> {
         if let Some(&v) = self.constant_registers.get(&register) {
             Value::Immediate(v)
         } else if let Some(&v) = self.duplicate_registers.get(&register) {
@@ -259,7 +280,7 @@ impl CodeBlockOptimser {
         }
     }
 
-    fn simplify_value(&self, value: Value) -> Value {
+    fn simplify_value(&self, value: Value<Word>) -> Value<Word> {
         match value {
             Value::Indirect(a) => Value::Indirect(self.simplify_address(a)),
             Value::Register(register) => self.simplify_register_maybe_value(register),
@@ -267,12 +288,16 @@ impl CodeBlockOptimser {
         }
     }
 
-    fn update_register_numbers(m: &HashMap<usize, usize>, opcode: OpcodeKind) -> OpcodeKind {
+    fn update_register_numbers(
+        m: &HashMap<usize, usize>,
+        opcode: OpcodeKind<Word>,
+    ) -> OpcodeKind<Word> {
         match opcode {
             OpcodeKind::Call(a, v) => OpcodeKind::Call(
                 Self::update_register_number_in_address(m, a),
                 Self::update_register_number_in_value(m, v),
             ),
+            OpcodeKind::CallLibrary(c, r, i, o) => OpcodeKind::CallLibrary(c, m[&r], m[&i], m[&o]),
             OpcodeKind::CheckInputs(r, i, o) => OpcodeKind::CheckInputs(m[&r], i, o),
             OpcodeKind::Load(c) => OpcodeKind::Load(c),
             OpcodeKind::LoadResv => OpcodeKind::LoadResv,
@@ -303,7 +328,10 @@ impl CodeBlockOptimser {
         }
     }
 
-    fn update_register_number_in_value(m: &HashMap<usize, usize>, value: Value) -> Value {
+    fn update_register_number_in_value(
+        m: &HashMap<usize, usize>,
+        value: Value<Word>,
+    ) -> Value<Word> {
         match value {
             Value::Register(r) => Value::Register(m[&r]),
             Value::Indirect(Address::Register(r)) => Value::Indirect(Address::Register(m[&r])),
@@ -318,12 +346,13 @@ impl CodeBlockOptimser {
         }
     }
 
-    fn remap_blocks(m: &HashMap<usize, usize>, opcode: OpcodeKind) -> OpcodeKind {
+    fn remap_blocks(m: &HashMap<usize, usize>, opcode: OpcodeKind<Word>) -> OpcodeKind<Word> {
         match opcode {
             OpcodeKind::Call(a, v) => OpcodeKind::Call(
                 Self::remap_blocks_in_address(m, a),
                 Self::remap_blocks_in_value(m, v),
             ),
+            OpcodeKind::CallLibrary(c, r, i, o) => OpcodeKind::CallLibrary(c, r, i, o),
             OpcodeKind::CheckInputs(r, i, o) => OpcodeKind::CheckInputs(r, i, o),
             OpcodeKind::Load(c) => OpcodeKind::Load(Self::remap_blocks_in_constant(m, c)),
             OpcodeKind::LoadResv => OpcodeKind::LoadResv,
@@ -352,7 +381,7 @@ impl CodeBlockOptimser {
         }
     }
 
-    fn remap_blocks_in_value(m: &HashMap<usize, usize>, value: Value) -> Value {
+    fn remap_blocks_in_value(m: &HashMap<usize, usize>, value: Value<Word>) -> Value<Word> {
         match value {
             Value::Indirect(a) => Value::Indirect(Self::remap_blocks_in_address(m, a)),
             Value::Immediate(c) => Value::Immediate(Self::remap_blocks_in_constant(m, c)),
@@ -367,7 +396,10 @@ impl CodeBlockOptimser {
         }
     }
 
-    fn remap_blocks_in_constant(m: &HashMap<usize, usize>, value: Constant) -> Constant {
+    fn remap_blocks_in_constant(
+        m: &HashMap<usize, usize>,
+        value: Constant<Word>,
+    ) -> Constant<Word> {
         match value {
             Constant::Address((b, a)) => Constant::Address((m[&b], a)),
             value => value,

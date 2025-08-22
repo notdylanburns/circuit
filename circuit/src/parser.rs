@@ -308,13 +308,14 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_item(&mut self) -> ParseResult<Node> {
-        const STARTING_TOKENS: [TokenType; 6] = [
+        const STARTING_TOKENS: [TokenType; 7] = [
             keyword!(Assert),
             keyword!(Circ),
             keyword!(Const),
             keyword!(Enum),
             keyword!(Import),
             keyword!(If),
+            keyword!(Use),
         ];
 
         recover!(
@@ -330,6 +331,7 @@ impl<'a> Parser<'a> {
                         kt::Enum => self.parse_enum(),
                         kt::If => self.parse_if(&mut Self::parse_item),
                         kt::Import => self.parse_import(),
+                        kt::Use => self.parse_use(),
                         _ => {
                             self.add_error(self.expected_error(&STARTING_TOKENS, &tk));
                             recover!()
@@ -685,6 +687,41 @@ impl<'a> Parser<'a> {
         ParseResult::some(node.r#if(condition, then, r#else).build(&end_pos))
     }
 
+    fn parse_use(&mut self) -> ParseResult<Node> {
+        let start = self.assert_token_is(keyword!(Use));
+
+        let result = recover!(
+            self,
+            {
+                let path = recover!(self, self.parse_path().wrap(), [keyword!(As)])?;
+
+                let name = match self.peek_next_token()?.token_type() {
+                    tt::Keyword(kt::As) => {
+                        self.consume_token()?;
+                        let name = self.expect_token_is(ident!())?;
+                        Some(NodeBuilder::identifier_from_token(name))
+                    }
+                    _ => None,
+                };
+
+                self.expect_next_token_is(punctuation!(Semicolon))?;
+
+                ParseResult::some((path, name))
+            },
+            [punctuation!(Semicolon)]
+        )?;
+
+        let end_tk = self.assert_token_is(punctuation!(Semicolon));
+
+        let Some((Some(path), name)) = result else {
+            return ParseResult::none();
+        };
+
+        let node = NodeBuilder::new(&start);
+
+        ParseResult::some(node.r#use(path, name).build(&end_tk))
+    }
+
     fn parse_statement(&mut self) -> ParseResult<Node> {
         let tk = self.peek_next_token()?;
 
@@ -721,7 +758,8 @@ impl<'a> Parser<'a> {
                     }
                 }
             },
-            [punctuation!(Semicolon)]
+            [punctuation!(Semicolon)],
+            consume_on_success = false,
         )?;
 
         let Some(statement) = result else {
@@ -1769,6 +1807,13 @@ impl NodeBuilder {
 
     pub fn with(self, decls: Vec<Node>) -> Self {
         self.node_type(NodeType::With(decls))
+    }
+
+    pub fn r#use(self, path: Node, name: Option<Node>) -> Self {
+        self.node_type(NodeType::Use {
+            path: Box::new(path),
+            as_name: name.map(Box::new),
+        })
     }
 }
 

@@ -1,10 +1,5 @@
-use crate::tokeniser::IdentId;
-use crate::util::difference;
-
-use super::scope::LocalSymbol;
 use super::CircId;
 use crate::ast::PinDirection;
-use std::rc::Rc;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(super) enum LocalType {

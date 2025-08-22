@@ -4,6 +4,7 @@ mod analyser;
 mod ast;
 mod codegen;
 mod diagnostics;
+mod extlib;
 mod loader;
 mod optimiser;
 mod parser;
@@ -11,7 +12,6 @@ mod tokeniser;
 mod util;
 
 use analyser::{Analyser, AnalyserResult};
-pub use codegen::Codegen;
 use diagnostics::{Diagnostic, Diagnostics};
 use loader::Loader;
 pub use optimiser::Optimiser;
@@ -42,28 +42,38 @@ fn main() -> ExitCode {
     };
 
     let analyser = Analyser::new(HashMap::new(), loader);
-    let (diagnostics, main, circs, mut loader) = match analyser.analyse() {
-        AnalyserResult::Success {
-            diagnostics,
-            main,
-            circs,
-            loader,
-        } => (diagnostics, main, circs, loader),
-        AnalyserResult::Error {
-            diagnostics,
-            mut loader,
-        } => {
-            for diagnostic in diagnostics {
-                eprintln!(
-                    "{}",
-                    diagnostic
-                        .to_string(&mut loader)
-                        .unwrap_or_else(|_| unreachable!("format failure"))
-                );
+    let (diagnostics, main, circs, mut loader, external_circ_count, libraries) =
+        match analyser.analyse() {
+            AnalyserResult::Success {
+                diagnostics,
+                main,
+                circs,
+                loader,
+                external_circ_count,
+                libraries,
+            } => (
+                diagnostics,
+                main,
+                circs,
+                loader,
+                external_circ_count,
+                libraries,
+            ),
+            AnalyserResult::Error {
+                diagnostics,
+                mut loader,
+            } => {
+                for diagnostic in diagnostics {
+                    eprintln!(
+                        "{}",
+                        diagnostic
+                            .to_string(&mut loader)
+                            .unwrap_or_else(|_| unreachable!("format failure"))
+                    );
+                }
+                return ExitCode::FAILURE;
             }
-            return ExitCode::FAILURE;
-        }
-    };
+        };
 
     for diagnostic in diagnostics {
         eprintln!(
@@ -76,9 +86,10 @@ fn main() -> ExitCode {
 
     let optimiser_units = Optimiser::optimise_circs(circs, main);
 
-    let ir_blocks = Codegen::emit_ir(&optimiser_units, main);
-    let optimised_blocks = Optimiser::optimise_ir(ir_blocks);
-    println!("{optimised_blocks}");
+    let ir =
+        codegen::targets::ir::generate_64(&optimiser_units, main, external_circ_count, libraries);
+
+    let optimised_blocks = Optimiser::optimise_ir(ir);
 
     codegen::targets::x86_64_linux_gas::generate(optimised_blocks, "main");
 

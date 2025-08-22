@@ -17,11 +17,21 @@ pub(super) struct CircArg {
 }
 
 #[derive(Debug)]
+pub(super) enum CircKind {
+    Module(Vec<Node>),
+    Library {
+        external_circ_id: usize,
+        initialise: circuit_extlib::InitialiserFn,
+        get_meta: circuit_extlib::GetMetaFn,
+    },
+}
+
+#[derive(Debug)]
 pub(super) struct CircSymbol {
     pub module_id: ModuleId,
     pub name: IdentId,
     pub args: OrderedMap<IdentId, CircArg>,
-    pub statements: Vec<Node>,
+    pub kind: CircKind,
     pub pos: Pos,
 }
 
@@ -248,7 +258,7 @@ impl Scope {
                 .is_some_and(|parent| parent.symbol_exists(name))
     }
 
-    fn add_symbol(&mut self, name: IdentId, symbol: ScopeSymbol) {
+    pub fn add_symbol(&mut self, name: IdentId, symbol: ScopeSymbol) {
         self.symbols.insert(name, symbol);
     }
 

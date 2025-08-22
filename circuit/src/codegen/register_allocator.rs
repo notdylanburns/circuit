@@ -133,7 +133,7 @@ impl<T: Registers> RegisterAllocator<T> {
 
             leases_to_acquire.push(cur_location);
 
-            for lease in lease_expiry.remove(&cur_location).unwrap_or(vec![]) {
+            for lease in lease_expiry.remove(&cur_location).unwrap_or_default() {
                 if let Some(register) = leases.remove(&lease) {
                     state.deallocate_register(register);
                 }
@@ -165,10 +165,7 @@ impl<T: Registers> RegisterAllocator<T> {
                 }
 
                 leases.insert(location, destination);
-                lease_expiry
-                    .entry(expiry)
-                    .or_insert_with(Vec::new)
-                    .push(location);
+                lease_expiry.entry(expiry).or_default().push(location);
             }
 
             active_leases.push(

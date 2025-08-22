@@ -144,12 +144,10 @@ impl AnsiColourType {
                     } else {
                         "\x1b[9"
                     }
+                } else if *bright {
+                    "\x1b[4"
                 } else {
-                    if *bright {
-                        "\x1b[4"
-                    } else {
-                        "\x1b[10"
-                    }
+                    "\x1b[10"
                 }
             }
             Self::_8Bit(_) => {

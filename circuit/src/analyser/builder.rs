@@ -1,6 +1,6 @@
 use super::{
-    Circ, CircId, Connection, ConnectionEndpoint, ConnectionRange, ConnectionType, IdentId, Pin,
-    PinDirection, PinExprType, PinId,
+    Circ, CircId, Connection, ConnectionEndpoint, ConnectionRange, ConnectionType, IdentId,
+    ModuleCirc, Pin, PinDirection, PinExprType, PinId,
 };
 use crate::util::OrderedMap;
 
@@ -19,7 +19,7 @@ enum ConnectionEndpointBuilder {
     },
 }
 
-#[derive(Default, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
 enum EndpointBuilderType {
     #[default]
     None,
@@ -27,7 +27,7 @@ enum EndpointBuilderType {
     Dependency,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(super) struct EndpointBuilder {
     t: EndpointBuilderType,
     pin: Option<PinId>,
@@ -103,7 +103,7 @@ pub(super) enum CannotConnectReason {
     },
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(super) struct ConnectionBuilder {
     width: Option<usize>,
     source: EndpointBuilder,
@@ -286,7 +286,7 @@ impl ConnectionBuilder {
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(super) struct CircBuilder {
     dependencies: HashMap<IdentId, (CircId, Option<usize>)>,
     pins: OrderedMap<IdentId, Pin>,
@@ -309,7 +309,7 @@ impl CircBuilder {
     }
 
     pub(super) fn pin(&mut self, name: IdentId, pin: Pin) -> &mut Self {
-        self.pins.insert(name, pin);
+        let _ = self.pins.insert(name, pin);
         self
     }
 
@@ -329,13 +329,12 @@ impl CircBuilder {
         dependency_array.sort_by_key(|(_, (v, _))| *v);
         let dependencies = dependency_array
             .into_iter()
-            .map(|(name, (circ_id, count))| {
+            .flat_map(|(name, (circ_id, count))| {
                 std::iter::repeat_n(circ_id, count.unwrap_or(1))
                     .enumerate()
                     .zip(std::iter::repeat(name))
                     .map(|((i, circ_id), name)| (name, i, circ_id))
-            })
-            .flatten();
+            });
 
         let dependency_start_indicies = dependencies
             .clone()
@@ -354,10 +353,11 @@ impl CircBuilder {
             .map(|c| c.build(&dependency_start_indicies))
             .collect::<Vec<_>>();
 
-        Circ {
+        ModuleCirc {
             dependencies: Rc::from(&dependencies[..]),
             pins: Rc::new(self.pins),
             connections: Rc::from(&connections[..]),
         }
+        .into()
     }
 }

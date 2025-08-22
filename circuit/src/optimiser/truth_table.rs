@@ -2,7 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::{
-    analyser::{Circ, CircId, ConnectionEndpoint, ConnectionRange, ConnectionType, PinId},
+    analyser::{
+        Circ, CircId, ConnectionEndpoint, ConnectionRange, ConnectionType, ModuleCirc, PinId,
+    },
     ast::PinDirection,
     util::Interner,
 };
@@ -123,7 +125,7 @@ impl TreeTable {
     }
 
     fn query_map(&self, inputs: &HashMap<BitEndpoint, Value>) -> Value {
-        self.query(self.get_input_row(&inputs))
+        self.query(self.get_input_row(inputs))
     }
 
     fn query(&self, input_row: BitString) -> Value {
@@ -405,7 +407,7 @@ type BitEndpointId = usize;
 
 #[derive(Debug)]
 struct TruthTableContext<'c> {
-    circ: &'c Circ,
+    circ: &'c ModuleCirc,
     endpoints: &'c Interner<BitEndpoint>,
     endpoint_inbound_connection_ids: &'c HashMap<BitEndpointId, Vec<BitConnectionId>>,
     bit_connections: &'c [BitConnection],
@@ -445,7 +447,7 @@ impl<'a> TruthTableOptimiser<'a> {
         .generate_truth_tables(main)
     }
 
-    fn get_pin_stats(circ: &Circ) -> PinStats {
+    fn get_pin_stats(circ: &ModuleCirc) -> PinStats {
         circ.pins
             .value_indices()
             .fold(PinStats::default(), |mut stats, (id, pin)| {
@@ -460,22 +462,22 @@ impl<'a> TruthTableOptimiser<'a> {
     }
 
     fn generate_truth_tables(&mut self, main: CircId) {
-        let OptimiserUnit::Circ(main) = &self.circs[main] else {
-            return;
+        let OptimiserUnit::Circ(Circ::ModuleCirc(main)) = &self.circs[main] else {
+            unreachable!()
         };
 
         let main = main.clone();
 
         for &dep in main.dependencies.iter() {
-            if matches!(self.circs[dep], OptimiserUnit::TruthTable(_)) {
+            let OptimiserUnit::Circ(Circ::ModuleCirc(_)) = &self.circs[dep] else {
                 continue;
-            }
+            };
             self.generate_truth_table(dep);
         }
     }
 
     fn generate_truth_table(&mut self, circ_id: CircId) -> bool {
-        let OptimiserUnit::Circ(circ) = &self.circs[circ_id] else {
+        let OptimiserUnit::Circ(Circ::ModuleCirc(circ)) = &self.circs[circ_id] else {
             unreachable!()
         };
 

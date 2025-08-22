@@ -5,21 +5,26 @@ mod scope;
 
 use builder::{CannotConnectReason, CircBuilder, ConnectionBuilder};
 use constexpr::{ConstType, ConstValue};
-use scope::{CircArg, CircSymbol, ConstSymbol, EnumSymbol, LocalSymbol, Scope, ScopeSymbol};
+use scope::{
+    CircArg, CircSymbol, ConstSymbol, EnumSymbol, LocalSymbol, ModuleSymbol, Scope, ScopeSymbol,
+};
 
 use crate::analyser::local::LocalType;
+use crate::analyser::scope::CircKind;
 use crate::ast::{
     ConnectionDirection, ConstExprOpType, Node, NodeType, PinDirection, PinExprOpType, AST,
 };
 use crate::diagnostics::diagnostic;
-use crate::loader::{Loader, ModuleId};
+use crate::extlib::{self, CircMeta, FromFfi};
+use crate::loader::{Loader, Module, ModuleId, ModuleType};
 use crate::parser::Parser;
 use crate::tokeniser::{IdentId, Tokeniser};
-use crate::util::{extract, Interner};
+use crate::util::{extract, Interner, LibrarySymbolType};
 
 use crate::util::{OrderedMap, Pos, Position};
 use crate::{Diagnostic, Diagnostics};
 use std::collections::HashMap;
+use std::path::Path;
 use std::rc::Rc;
 
 macro_rules! catch_error {
@@ -50,10 +55,25 @@ pub type CircId = usize;
 pub type PinId = usize;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct CircSignature {
+pub struct CircSignature {
     module_id: ModuleId,
     name: IdentId,
     args: Rc<[ConstValue]>,
+}
+
+impl CircSignature {
+    pub fn get_library_circ_args(&self) -> Vec<circuit_extlib::ConstValue> {
+        self.args
+            .iter()
+            .map(|a| match a {
+                ConstValue::Bool(b) => circuit_extlib::ConstValue::from(*b),
+                ConstValue::Int(i) => circuit_extlib::ConstValue::from(*i),
+                ConstValue::Range(..) => todo!(),
+                ConstValue::Enum { .. } => todo!(),
+                ConstValue::Unknown => todo!(),
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -110,10 +130,47 @@ pub struct Connection {
 }
 
 #[derive(Debug, Clone)]
-pub struct Circ {
+pub enum Circ {
+    ModuleCirc(ModuleCirc),
+    LibraryCirc(LibraryCirc),
+}
+
+impl Circ {
+    pub fn pins(&self) -> &OrderedMap<IdentId, Pin> {
+        match self {
+            Self::ModuleCirc(c) => &c.pins,
+            Self::LibraryCirc(c) => &c.pins,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ModuleCirc {
     pub dependencies: Rc<[CircId]>,
     pub pins: Rc<OrderedMap<IdentId, Pin>>,
     pub connections: Rc<[Connection]>,
+    // TODO: support tick_behaviour for ModuleCircs
+}
+
+impl From<ModuleCirc> for Circ {
+    fn from(value: ModuleCirc) -> Self {
+        Self::ModuleCirc(value)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct LibraryCirc {
+    pub mem_size: usize,
+    pub pins: Rc<OrderedMap<IdentId, Pin>>,
+    pub initialise: circuit_extlib::InitialiserFn,
+    pub circ_index: usize,
+    pub signature: CircSignature,
+}
+
+impl From<LibraryCirc> for Circ {
+    fn from(value: LibraryCirc) -> Self {
+        Self::LibraryCirc(value)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -251,6 +308,7 @@ impl AnalyserError {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuildConst {
     Bool(bool),
     Int(isize),
@@ -272,6 +330,8 @@ pub enum AnalyserResult {
         main: CircId,
         circs: Vec<Circ>,
         loader: Loader,
+        external_circ_count: usize,
+        libraries: Vec<Rc<Path>>,
     },
     Error {
         diagnostics: Diagnostics,
@@ -288,26 +348,32 @@ struct AnalyserContext {
 pub struct Analyser {
     loader: Loader,
     interner: Interner<String>,
+    build_consts: HashMap<String, BuildConst>,
     global_scope: Rc<Scope>,
     diagnostics: Diagnostics,
+    external_modules: HashMap<ModuleId, (Rc<Path>, usize)>,
     module_exports: HashMap<ModuleId, Rc<Scope>>,
     import_stack: Vec<ModuleId>,
     circs: OrderedMap<CircSignature, Circ>,
+    external_circ_counter: usize,
 }
 
 impl Analyser {
     pub fn new(build_consts: HashMap<String, BuildConst>, loader: Loader) -> Self {
         let mut interner = Interner::new();
-        let global_scope = Rc::new(Self::get_global_scope(&mut interner, build_consts));
+        let global_scope = Rc::new(Self::get_global_scope(&mut interner, &build_consts));
 
         Self {
             loader,
             interner,
+            build_consts,
             global_scope,
             diagnostics: Diagnostics::new(),
+            external_modules: HashMap::new(),
             module_exports: HashMap::new(),
             import_stack: Vec::new(),
             circs: OrderedMap::new(),
+            external_circ_counter: 0,
         }
     }
 
@@ -338,11 +404,20 @@ impl Analyser {
                 loader: self.loader,
             }
         } else {
+            let mut libraries = self
+                .external_modules
+                .into_iter()
+                .map(|(_, (path, order))| (order, path))
+                .collect::<Vec<_>>();
+            libraries.sort_by_key(|(order, _)| *order);
+
             AnalyserResult::Success {
                 diagnostics: self.diagnostics,
                 main: main.unwrap(),
                 circs: self.circs.into_values(),
                 loader: self.loader,
+                external_circ_count: self.external_circ_counter,
+                libraries: libraries.into_iter().map(|(_, path)| path).collect(),
             }
         }
     }
@@ -352,7 +427,7 @@ impl Analyser {
         name: &str,
         relative_to: ModuleId,
     ) -> Result<ModuleId, Diagnostics> {
-        let module_id = self.loader.load_module(&name, relative_to)?;
+        let module_id = self.loader.load_module(name, relative_to)?;
 
         if self.import_stack.contains(&module_id) {
             let chain: Vec<_> = self
@@ -364,7 +439,14 @@ impl Analyser {
             todo!("circular import error")
         }
 
-        self.process_module(module_id)?;
+        if self.module_exports.contains_key(&module_id) {
+            return Ok(module_id);
+        }
+
+        match self.loader.get_module_type(module_id).unwrap() {
+            ModuleType::Module => self.process_module(module_id)?,
+            ModuleType::Library => self.process_library_module(module_id)?,
+        };
 
         Ok(module_id)
     }
@@ -386,17 +468,125 @@ impl Analyser {
         Ok(())
     }
 
+    fn process_nested_library_module(
+        &mut self,
+        module_id: ModuleId, // TODO: fix for nested libs
+        ctx: &mut AnalyserContext,
+        lib: extlib::Library,
+    ) -> Result<bool, Diagnostics> {
+        let mut requires_runtime_loading = false;
+
+        for (n, circ) in lib.circs.iter().enumerate() {
+            requires_runtime_loading = true;
+
+            let pos = Pos::Library(module_id, LibrarySymbolType::Circ, n);
+
+            let name = self.interner.intern_ref(circ.name.as_ref());
+
+            let mut args = OrderedMap::new();
+
+            for arg in circ.args.iter() {
+                let name = self.interner.intern_ref(arg.name.as_ref());
+                if !args.insert_new(
+                    name,
+                    CircArg {
+                        name,
+                        r#type: arg.arg_type.into(),
+                        default: ConstValue::from_extracted_const(&arg.default),
+                        pos,
+                    },
+                ) {
+                    todo!("duplicate arg error")
+                }
+            }
+
+            if !self.check_symbol_exists(&ctx, name, pos) {
+                ctx.scope.add_circ(CircSymbol {
+                    module_id,
+                    name,
+                    args,
+                    kind: CircKind::Library {
+                        external_circ_id: self.external_circ_counter,
+                        initialise: circ.initialise,
+                        get_meta: circ.get_meta,
+                    },
+                    pos,
+                });
+            }
+
+            self.external_circ_counter += 1;
+        }
+
+        for (n, en) in lib.enums.iter().enumerate() {
+            let pos = Pos::Library(module_id, LibrarySymbolType::Enum, n);
+
+            let name = self.interner.intern_ref(en.name.as_ref());
+            let variants = en
+                .variants
+                .iter()
+                .map(|v| (self.interner.intern_ref(v.as_ref()), pos))
+                .collect();
+
+            if !self.check_symbol_exists(&ctx, name, pos) {
+                ctx.scope.add_enum(EnumSymbol {
+                    module_id,
+                    name,
+                    variants,
+                    pos,
+                });
+            }
+        }
+
+        for (n, l) in lib.libraries.iter().enumerate() {
+            let pos = Pos::Library(module_id, LibrarySymbolType::Library, n);
+
+            let name = self.interner.intern_ref(l.name.as_ref());
+
+            // if self.process_nested_library_module(...)? {
+            //     requires_runtime_loading = true;
+            // }
+            todo!();
+        }
+
+        Ok(requires_runtime_loading)
+    }
+
+    fn process_library_module(&mut self, module_id: ModuleId) -> Result<(), Diagnostics> {
+        let Some(Module::Library(module)) = self.loader.get_module_mut(module_id) else {
+            unreachable!();
+        };
+
+        let module_path = module.path();
+
+        let mut ctx = AnalyserContext {
+            module_id,
+            scope: self.global_scope.child(),
+        };
+
+        let lib = module.initialise(&self.build_consts)?;
+
+        if self.process_nested_library_module(module_id, &mut ctx, lib)? {
+            let module_load_order = self.external_modules.len();
+            self.external_modules
+                .insert(module_id, (module_path, module_load_order));
+        }
+
+        self.module_exports.insert(module_id, Rc::new(ctx.scope));
+
+        Ok(())
+    }
+
     fn get_global_scope(
         interner: &mut Interner<String>,
-        build_consts: HashMap<String, BuildConst>,
+        build_consts: &HashMap<String, BuildConst>,
     ) -> Scope {
         let builtin_scope = Scope::builtin(interner);
         let mut global_scope = builtin_scope.child();
 
         for (name, value) in build_consts {
-            let name = interner.intern(name);
+            let name = interner.intern_ref(name);
 
-            let value: ConstValue = value.into();
+            let value: ConstValue = (*value).into();
 
             global_scope.add_const(ConstSymbol {
                 name,
@@ -410,7 +600,9 @@ impl Analyser {
     }
 
     fn parse_module(&mut self, module_id: ModuleId) -> Result<AST, Diagnostics> {
-        let module = self.loader.get_module_mut(module_id).unwrap();
+        let Some(Module::Module(module)) = self.loader.get_module_mut(module_id) else {
+            unreachable!()
+        };
 
         let content = module.read()?;
 
@@ -425,21 +617,6 @@ impl Analyser {
 
         Ok(parser_result.ast)
     }
-
-    // fn parse_module(&mut self, module: &mut Module) -> Result<AST, Diagnostics> {
-    //     let content = module.read()?;
-
-    //     let tokeniser = Tokeniser::new(module.id, &content, &mut self.interner);
-    //     let tokeniser_result = tokeniser.tokenise()?;
-
-    //     let parser = Parser::new(module.id, tokeniser_result.tokens());
-    //     let parser_result = parser.parse()?;
-
-    //     self.diagnostics.append(tokeniser_result.diagnostics);
-    //     self.diagnostics.append(parser_result.diagnostics);
-
-    //     Ok(parser_result.ast)
-    // }
 
     fn resolve_ident(&self, ident_id: IdentId) -> &str {
         self.interner
@@ -460,6 +637,7 @@ impl Analyser {
                 NodeType::Enum { .. } => self.evaluate_enum(ctx, node)?,
                 NodeType::If { .. } => self.evaluate_global_if(ctx, node)?,
                 NodeType::Import(_) => self.evaluate_import(ctx, node)?,
+                NodeType::Use { .. } => self.evaluate_use(ctx, node)?,
                 _ => unreachable!("parser bug - node not allowed at top level: {node:#?}"),
             }
         }
@@ -602,7 +780,7 @@ impl Analyser {
             module_id: ctx.module_id,
             name,
             args,
-            statements,
+            kind: CircKind::Module(statements),
             pos,
         });
 
@@ -841,10 +1019,44 @@ impl Analyser {
 
         if !already_defined {
             match self.import_module(&name, ctx.module_id) {
-                Ok(_) => (),
+                Ok(module_id) => ctx.scope.add_module(ModuleSymbol {
+                    name: name_id,
+                    module_id,
+                    pos,
+                }),
                 Err(ds) => self
                     .diagnostics
                     .append(ds.into_iter().map(|d| d.with_pos(pos))),
+            }
+        }
+
+        Ok(())
+    }
+
+    fn evaluate_use(&mut self, ctx: &mut AnalyserContext, node: Node) -> Result<(), Diagnostics> {
+        let (nt, pos) = node.parts();
+
+        let (path_node, name_node) = extract!(nt, NodeType::Use { path, as_name });
+
+        let (path_nt, _) = path_node.parts();
+
+        let path_nodes = extract!(path_nt, NodeType::Path[nodes]);
+        let symbol = catch_error!(
+            self,
+            self.resolve_path(&ctx.scope, &path_nodes).map(Some),
+            None
+        );
+
+        let name_node = name_node
+            .as_ref()
+            .map(|b| b.as_ref())
+            .unwrap_or_else(|| path_nodes.last().unwrap());
+
+        let name = extract_identifier(name_node);
+
+        if !self.check_symbol_exists(ctx, name, pos) {
+            if let Some(symbol) = symbol {
+                ctx.scope.add_symbol(name, symbol);
             }
         }
 
@@ -1083,6 +1295,29 @@ impl Analyser {
         };
 
         Ok(result)
+    }
+
+    fn check_symbol_exists_library(
+        &mut self,
+        module_id: ModuleId,
+        scope: &Scope,
+        name: IdentId,
+    ) -> bool {
+        let Some(sym) = scope.get_symbol(name) else {
+            return false;
+        };
+
+        self.diagnostics.push(diagnostic!(
+            Error,
+            format!(
+                "symbol '{}' already defined as {}",
+                self.resolve_ident(name),
+                sym.get_type().error_msg_str()
+            ),
+            pos = Pos::Module(module_id),
+        ));
+
+        true
     }
 
     fn check_symbol_exists(
@@ -1350,6 +1585,10 @@ impl Analyser {
             });
         }
 
+        let CircKind::Module(statements) = &circ.kind else {
+            return self.process_library_circ(signature, &circ);
+        };
+
         let mut ctx = AnalyserContext {
             scope,
             module_id: circ.module_id,
@@ -1357,9 +1596,66 @@ impl Analyser {
 
         let mut circ_builder = CircBuilder::default();
 
-        self.evaluate_circ_items(&mut ctx, &mut circ_builder, circ.statements.iter())?;
+        self.evaluate_circ_items(&mut ctx, &mut circ_builder, statements.iter())?;
 
         match self.circs.insert(signature, circ_builder.build()) {
+            Ok(circ_id) => Ok(circ_id),
+            Err(c) => unreachable!("circ already analysed: {c:#?}"),
+        }
+    }
+
+    fn process_library_circ(
+        &mut self,
+        signature: CircSignature,
+        circ: &CircSymbol,
+    ) -> Result<CircId, Diagnostics> {
+        let CircKind::Library {
+            external_circ_id,
+            initialise,
+            get_meta,
+        } = circ.kind
+        else {
+            unreachable!();
+        };
+
+        let Pos::Library(_, LibrarySymbolType::Circ, _) = circ.pos else {
+            unreachable!("circ signature pos must be a library circ");
+        };
+
+        let args = signature.get_library_circ_args();
+
+        let meta = unsafe { CircMeta::from_ffi(&get_meta(args.len(), args.as_ptr())) };
+
+        let mut pins = OrderedMap::new();
+        for pin in meta.pins.iter() {
+            let name = self.interner.intern_ref(pin.name.as_ref());
+            if !pins.insert_new(
+                name,
+                Pin {
+                    name,
+                    direction: match pin.direction {
+                        circuit_extlib::PinDirection::Input => PinDirection::Input,
+                        circuit_extlib::PinDirection::Output => PinDirection::Output,
+                        circuit_extlib::PinDirection::Transput => PinDirection::Transput,
+                    },
+                    width: pin.width,
+                },
+            ) {
+                todo!("duplicate pin error")
+            };
+        }
+
+        match self.circs.insert(
+            signature.clone(),
+            LibraryCirc {
+                mem_size: meta.mem_size,
+                pins: Rc::new(pins),
+                initialise,
+                circ_index: external_circ_id,
+                signature,
+            }
+            .into(),
+        ) {
             Ok(circ_id) => Ok(circ_id),
             Err(c) => unreachable!("circ already analysed: {c:#?}"),
         }
@@ -1472,6 +1768,8 @@ impl Analyser {
         let (r#type, decls) = extract!(node.node_type(), NodeType::Decls { r#type, decls });
 
         let Some(sig) = self.evaluate_type(ctx, r#type)? else {
+            dbg!(&r#type);
+            dbg!(&ctx.scope);
             todo!("add all decls to scope with unknown type")
         };
 
@@ -1490,7 +1788,7 @@ impl Analyser {
             let width = count.as_ref().map(|count| {
                 catch_errors!(
                     self,
-                    self.evaluate_constexpr(&ctx, count),
+                    self.evaluate_constexpr(ctx, count),
                     ConstValue::Unknown
                 )
             });
@@ -1570,11 +1868,11 @@ impl Analyser {
 
         let args = self.get_resolved_circ_args(ctx, &circ, &args)?;
 
-        return Ok(Some(CircSignature {
+        Ok(Some(CircSignature {
             module_id: circ.module_id,
             name: circ.name,
             args: args.into(),
-        }));
+        }))
     }
 
     fn get_resolved_circ_args(
@@ -1672,7 +1970,7 @@ impl Analyser {
             }
         }
 
-        return Ok(args_ordered);
+        Ok(args_ordered)
     }
 
     fn evaluate_pin_decls(
@@ -1768,7 +2066,7 @@ impl Analyser {
                 rhs,
             }) => todo!("direction mismatch diagnostic: {conn_type:#?} {lhs:#?} {rhs:#?}"),
             Err(CannotConnectReason::InvalidEndpoint { lhs, rhs }) => {
-                todo!("invalid endpoint diagnostic")
+                todo!("invalid endpoint diagnostic: {lhs:?} {rhs:?}")
             }
             Err(CannotConnectReason::WidthMismatch(lhs, rhs)) => todo!("width mismatch diagnostic"),
         }
@@ -1797,6 +2095,8 @@ impl Analyser {
             }
         }
 
+        dbg!(circ);
+        dbg!(self.resolve_ident(name));
         todo!("not valid in pinexpr diagnostic")
     }
 
@@ -2175,12 +2475,12 @@ impl Analyser {
                     .get_by_index(circ_id)
                     .unwrap_or_else(|| unreachable!("invalid circ id: {circ_id}"));
 
-                let pin_id = match circ.pins.get_index(&pin_name) {
+                let pin_id = match circ.pins().get_index(&pin_name) {
                     Some(pin_id) => pin_id,
                     None => todo!("invalid pin diagnostic"),
                 };
 
-                let Some(&pin) = circ.pins.get(&pin_name) else {
+                let Some(&pin) = circ.pins().get(&pin_name) else {
                     unreachable!("pin id {pin_id} not found in pins for circ {circ:#?}");
                 };
 

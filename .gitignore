@@ -1,1 +1,4 @@
 **/target
+circuit/targets/*/*.o
+circuit-extlib/Cargo.lock
+circuit-core/Cargo.lock

@@ -1,4 +1,3 @@
-use std::cell::OnceCell;
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs::File;
@@ -6,23 +5,24 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+use crate::analyser::BuildConst;
 use crate::diagnostics::{diagnostic, Diagnostic};
+use crate::extlib::{self, FromFfi};
 use crate::util::{Interner, Pos};
 
 pub type ModuleId = usize;
 
 #[derive(Debug)]
-pub struct Module {
+pub struct StandardModule {
     pub id: ModuleId,
     path: Rc<Path>,
     path_string: String,
     file: File,
     length: usize,
     linemap: Vec<usize>,
-    imports: OnceCell<HashMap<String, ModuleId>>,
 }
 
-impl Module {
+impl StandardModule {
     fn new(id: ModuleId, path: PathBuf) -> Result<Self, Diagnostic> {
         let path: Rc<Path> = Rc::from(path);
         let path_string = path.display().to_string();
@@ -58,7 +58,6 @@ impl Module {
             file,
             length,
             linemap,
-            imports: OnceCell::new(),
         })
     }
 
@@ -72,12 +71,6 @@ impl Module {
 
     pub fn path_str(&self) -> &str {
         &self.path_string
-    }
-
-    pub fn set_imports(&mut self, imports: HashMap<String, ModuleId>) {
-        self.imports
-            .set(imports)
-            .unwrap_or_else(|_| unreachable!("imports already set"));
     }
 
     pub fn read(&mut self) -> Result<String, Diagnostic> {
@@ -192,6 +185,155 @@ impl Module {
 }
 
 #[derive(Debug)]
+pub struct LibraryModule {
+    pub id: ModuleId,
+    pub path: Rc<Path>,
+    pub path_string: String,
+    lib: Option<libloading::Library>,
+}
+
+impl LibraryModule {
+    fn new(id: ModuleId, path: PathBuf) -> Self {
+        let path: Rc<Path> = Rc::from(path);
+        let path_string = path.display().to_string();
+
+        Self {
+            id,
+            path,
+            path_string,
+            lib: None,
+        }
+    }
+
+    pub fn id(&self) -> ModuleId {
+        self.id
+    }
+
+    pub fn path(&self) -> Rc<Path> {
+        Rc::clone(&self.path)
+    }
+
+    pub fn path_str(&self) -> &str {
+        &self.path_string
+    }
+
+    pub fn initialise(
+        &mut self,
+        build_consts: &HashMap<String, BuildConst>,
+    ) -> Result<extlib::Library, Diagnostic> {
+        let build_consts = build_consts
+            .iter()
+            .map(|(name, value)| circuit_extlib::BuildConst {
+                name: name.as_bytes().as_ptr() as *const u8,
+                value: match value {
+                    BuildConst::Int(i) => circuit_extlib::ConstValue::from(*i),
+                    BuildConst::Bool(b) => circuit_extlib::ConstValue::from(*b),
+                },
+            })
+            .collect::<Vec<_>>();
+
+        unsafe {
+            let lib = libloading::Library::new(self.path.as_os_str()).map_err(|e| {
+                diagnostic!(
+                    Error,
+                    format!("failed to open module '{}': {e}", &self.path_string)
+                )
+            })?;
+
+            let init: libloading::Symbol<'_, extlib::InitFn> = lib.get(b"init\0").map_err(|e| {
+                diagnostic!(
+                    Error,
+                    format!("failed to initialise module '{}': {e}", &self.path_string)
+                )
+            })?;
+
+            let result = self.initialise_internal(init, build_consts.len(), build_consts.as_ptr());
+
+            // needed to keep the symbols loaded until we have finished analysing
+            self.lib = Some(lib);
+
+            result
+        }
+    }
+
+    unsafe fn initialise_internal(
+        &self,
+        init: libloading::Symbol<extlib::InitFn>,
+        argc: usize,
+        argv: *const circuit_extlib::BuildConst,
+    ) -> Result<extlib::Library, Diagnostic> {
+        let circuit_extlib::InitResult { library, error } = init(argc, argv);
+
+        if error.is_null() {
+            return Ok(extlib::Library::from_ffi(&library));
+        };
+
+        Err(diagnostic!(
+            Error,
+            format!(
+                "failed to initialise module '{}': {}",
+                &self.path_string,
+                std::ffi::CStr::from_ptr(error as *const i8).to_string_lossy(),
+            )
+        ))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModuleType {
+    Module,
+    Library,
+}
+
+#[derive(Debug)]
+pub enum Module {
+    Module(StandardModule),
+    Library(LibraryModule),
+}
+
+impl Module {
+    pub fn id(&self) -> ModuleId {
+        match self {
+            Self::Module(m) => m.id,
+            Self::Library(m) => m.id,
+        }
+    }
+
+    pub fn path(&self) -> Rc<Path> {
+        Rc::clone(match self {
+            Self::Module(m) => &m.path,
+            Self::Library(m) => &m.path,
+        })
+    }
+
+    pub fn path_str(&self) -> &str {
+        match self {
+            Self::Module(m) => &m.path_string,
+            Self::Library(m) => &m.path_string,
+        }
+    }
+
+    pub fn module_type(&self) -> ModuleType {
+        match self {
+            Self::Module(..) => ModuleType::Module,
+            Self::Library(..) => ModuleType::Library,
+        }
+    }
+}
+
+impl From<StandardModule> for Module {
+    fn from(value: StandardModule) -> Self {
+        Self::Module(value)
+    }
+}
+
+impl From<LibraryModule> for Module {
+    fn from(value: LibraryModule) -> Self {
+        Self::Library(value)
+    }
+}
+
+#[derive(Debug)]
 pub struct Loader {
     interner: Interner<PathBuf>,
     modules: Vec<Module>,
@@ -209,8 +351,8 @@ impl Loader {
     fn default_search_paths() -> [PathBuf; 3] {
         [
             PathBuf::from("."),
-            PathBuf::from("/usr/lib/circuit"),
             PathBuf::from("/usr/local/lib/circuit"),
+            PathBuf::from("/usr/lib/circuit"),
         ]
     }
 
@@ -247,31 +389,46 @@ impl Loader {
             .get(relative_to)
             .unwrap_or_else(|| unreachable!("invalid module id: {relative_to}"));
 
-        let module_name = module.path.file_stem().unwrap_or_else(|| {
-            unreachable!("module path '{}' has no file name", module.path.display())
+        let module_path = module.path();
+
+        let module_name = module_path.file_stem().unwrap_or_else(|| {
+            unreachable!("module path '{}' has no file name", module.path_str())
         });
 
-        let module_root = module.path.parent().unwrap_or_else(|| {
+        let module_root = module_path.parent().unwrap_or_else(|| {
             unreachable!(
                 "module path '{}' has no parent directory",
-                module.path.display()
+                module.path_str()
             )
         });
 
         let search_paths = Self::get_search_paths(module_name, module_root);
         for path in search_paths.iter() {
-            let module_path = match path.join(name).with_extension("ckt").canonicalize() {
-                Ok(path) => path,
-                Err(_) => continue,
+            if let Ok(module_path) = path.join(name).with_extension("ckt").canonicalize() {
+                if module_path.exists() {
+                    let module_id = self.intern(&module_path);
+                    if self.modules.len() <= module_id {
+                        self.modules
+                            .push(StandardModule::new(module_id, module_path)?.into());
+                    }
+
+                    return Ok(module_id);
+                }
+            }
+
+            let Ok(shared_obj_path) = path.join(name).with_extension("cktlib").canonicalize()
+            else {
+                continue;
             };
 
-            if !module_path.exists() {
+            if !shared_obj_path.exists() {
                 continue;
             }
 
-            let module_id = self.intern(&module_path);
+            let module_id = self.intern(&shared_obj_path);
             if self.modules.len() <= module_id {
-                self.modules.push(Module::new(module_id, module_path)?);
+                self.modules
+                    .push(LibraryModule::new(module_id, shared_obj_path).into());
             }
 
             return Ok(module_id);
@@ -303,9 +460,14 @@ impl Loader {
 
         let module_id = self.intern(&path);
         assert_eq!(module_id, Self::ROOT_MODULE, "root module id must be 0");
-        self.modules.push(Module::new(module_id, path)?);
+        self.modules
+            .push(StandardModule::new(module_id, path)?.into());
 
         return Ok(&mut self.modules[module_id]);
+    }
+
+    pub fn get_module_type(&self, module_id: ModuleId) -> Option<ModuleType> {
+        self.get_module(module_id).map(|m| m.module_type())
     }
 
     pub fn get_module(&self, module_id: ModuleId) -> Option<&Module> {
@@ -332,7 +494,7 @@ mod tests {
     #[test]
     fn test_module_read_lines() {
         let mut module =
-            Module::new(0, PathBuf::from("tests/loader/module_read_lines.ckt")).unwrap();
+            StandardModule::new(0, PathBuf::from("tests/loader/module_read_lines.ckt")).unwrap();
         assert_eq!(module.read_line(5).unwrap(), "    circ A {");
     }
 }
