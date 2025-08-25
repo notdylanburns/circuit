@@ -703,9 +703,9 @@ impl<'a> TruthTableOptimiser<'a> {
     //         .collect()
     // }
 
-    fn generate_connection_tree<'c>(
+    fn generate_connection_tree(
         &mut self,
-        ctx: &TruthTableContext<'c>,
+        ctx: &TruthTableContext,
         endpoint_id: BitEndpointId,
     ) -> Option<Rc<ConnectionTree>> {
         let mut dependencies = Vec::new();
@@ -738,8 +738,13 @@ impl<'a> TruthTableOptimiser<'a> {
             true
         } else if self.attempted.contains(&circ_id) {
             false
-        } else {
+        } else if matches!(
+            &self.circs[circ_id],
+            OptimiserUnit::Circ(Circ::ModuleCirc(_))
+        ) {
             self.generate_truth_table(circ_id)
+        } else {
+            false
         }
     }
 }

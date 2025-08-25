@@ -4,7 +4,7 @@ mod local;
 mod scope;
 
 use builder::{CannotConnectReason, CircBuilder, ConnectionBuilder};
-use constexpr::{ConstType, ConstValue};
+pub use constexpr::{ConstType, ConstValue};
 use scope::{
     CircArg, CircSymbol, ConstSymbol, EnumSymbol, LocalSymbol, ModuleSymbol, Scope, ScopeSymbol,
 };
@@ -19,7 +19,7 @@ use crate::extlib::{self, CircMeta, FromFfi};
 use crate::loader::{Loader, Module, ModuleId, ModuleType};
 use crate::parser::Parser;
 use crate::tokeniser::{IdentId, Tokeniser};
-use crate::util::{extract, Interner, LibrarySymbolType};
+use crate::util::{extract, Interner};
 
 use crate::util::{OrderedMap, Pos, Position};
 use crate::{Diagnostic, Diagnostics};
@@ -446,6 +446,7 @@ impl Analyser {
         match self.loader.get_module_type(module_id).unwrap() {
             ModuleType::Module => self.process_module(module_id)?,
             ModuleType::Library => self.process_library_module(module_id)?,
+            ModuleType::Submodule => unreachable!("submodules cannot be imported directly"),
         };
 
         Ok(module_id)
@@ -468,18 +469,22 @@ impl Analyser {
         Ok(())
     }
 
-    fn process_nested_library_module(
+    fn process_submodule(
         &mut self,
-        module_id: ModuleId, // TODO: fix for nested libs
-        ctx: &mut AnalyserContext,
-        lib: extlib::Library,
+        module_id: ModuleId,
+        lib: &extlib::Library,
     ) -> Result<bool, Diagnostics> {
+        let mut ctx = AnalyserContext {
+            module_id,
+            scope: self.global_scope.child(),
+        };
+
         let mut requires_runtime_loading = false;
 
-        for (n, circ) in lib.circs.iter().enumerate() {
+        for circ in lib.circs.iter() {
             requires_runtime_loading = true;
 
-            let pos = Pos::Library(module_id, LibrarySymbolType::Circ, n);
+            let pos = Pos::Library(module_id, circ.defined_at);
 
             let name = self.interner.intern_ref(circ.name.as_ref());
 
@@ -517,8 +522,8 @@ impl Analyser {
             self.external_circ_counter += 1;
         }
 
-        for (n, en) in lib.enums.iter().enumerate() {
-            let pos = Pos::Library(module_id, LibrarySymbolType::Enum, n);
+        for en in lib.enums.iter() {
+            let pos = Pos::Library(module_id, en.defined_at);
 
             let name = self.interner.intern_ref(en.name.as_ref());
             let variants = en
@@ -537,16 +542,29 @@ impl Analyser {
             }
         }
 
-        for (n, l) in lib.libraries.iter().enumerate() {
-            let pos = Pos::Library(module_id, LibrarySymbolType::Library, n);
+        for l in lib.libraries.iter() {
+            let pos = Pos::Library(module_id, l.defined_at);
+
+            let module_id =
+                self.loader
+                    .insert_submodule(module_id, l.name.to_string(), l.defined_at);
 
             let name = self.interner.intern_ref(l.name.as_ref());
 
-            // if self.process_nested_library_module(...)? {
-            //     requires_runtime_loading = true;
-            // }
-            todo!();
+            if self.process_submodule(module_id, l)? {
+                requires_runtime_loading = true;
+            };
+
+            if !self.check_symbol_exists(&ctx, name, pos) {
+                ctx.scope.add_module(ModuleSymbol {
+                    name,
+                    module_id,
+                    pos,
+                });
+            }
         }
+
+        self.module_exports.insert(module_id, Rc::new(ctx.scope));
 
         Ok(requires_runtime_loading)
     }
@@ -558,20 +576,14 @@ impl Analyser {
 
         let module_path = module.path();
 
-        let mut ctx = AnalyserContext {
-            module_id,
-            scope: self.global_scope.child(),
-        };
-
         let lib = module.initialise(&self.build_consts)?;
 
-        if self.process_nested_library_module(module_id, &mut ctx, lib)? {
+        if self.process_submodule(module_id, &lib)? {
+            eprintln!("will runtime load {}", module_path.display());
             let module_load_order = self.external_modules.len();
             self.external_modules
                 .insert(module_id, (module_path, module_load_order));
         }
-
-        self.module_exports.insert(module_id, Rc::new(ctx.scope));
 
         Ok(())
     }
@@ -1618,13 +1630,24 @@ impl Analyser {
             unreachable!();
         };
 
-        let Pos::Library(_, LibrarySymbolType::Circ, _) = circ.pos else {
-            unreachable!("circ signature pos must be a library circ");
-        };
-
         let args = signature.get_library_circ_args();
 
-        let meta = unsafe { CircMeta::from_ffi(&get_meta(args.len(), args.as_ptr())) };
+        let meta = unsafe {
+            let meta = get_meta(args.len(), args.as_ptr());
+            if !meta.error.is_null() {
+                Err(diagnostic!(
+                    Error,
+                    format!(
+                        "failed to get metadata for circuit '{}': {}",
+                        self.resolve_ident(signature.name),
+                        Box::from_ffi(&meta.error)
+                    ),
+                    pos = circ.pos,
+                ))?
+            } else {
+                CircMeta::from_ffi(&meta)
+            }
+        };
 
         let mut pins = OrderedMap::new();
         for pin in meta.pins.iter() {
@@ -2477,7 +2500,7 @@ impl Analyser {
 
                 let pin_id = match circ.pins().get_index(&pin_name) {
                     Some(pin_id) => pin_id,
-                    None => todo!("invalid pin diagnostic"),
+                    None => todo!("invalid pin diagnostic: {:?}", node.pos()),
                 };
 
                 let Some(&pin) = circ.pins().get(&pin_name) else {

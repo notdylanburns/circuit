@@ -2,7 +2,7 @@ use crate::loader::ModuleId;
 use crate::tokeniser::IdentId;
 
 #[derive(Debug, Hash, Eq, Copy, Clone)]
-pub(super) enum ConstType {
+pub enum ConstType {
     Unknown,
     Int,
     Bool,
@@ -66,7 +66,7 @@ impl From<circuit_extlib::ConstType> for ConstType {
 }
 
 #[derive(Debug, Eq, PartialEq, Copy, Clone, Hash)]
-pub(super) enum ConstValue {
+pub enum ConstValue {
     Unknown,
     Int(isize),
     Bool(bool),

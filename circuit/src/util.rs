@@ -9,7 +9,7 @@ pub use interner::Interner;
 
 mod linked;
 
-use crate::loader::ModuleId;
+use crate::{extlib::DefinedAt, loader::ModuleId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LibrarySymbolType {
@@ -24,7 +24,7 @@ pub enum Pos {
     None,
     Builtin,
     Module(ModuleId),
-    Library(ModuleId, LibrarySymbolType, usize),
+    Library(ModuleId, DefinedAt),
     Pos {
         module_id: ModuleId,
         line: usize,

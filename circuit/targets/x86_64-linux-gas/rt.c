@@ -15,12 +15,16 @@
 #define MAX_LIBRARY_COUNT 1024
 #endif
 
-#ifndef usize
-#define usize uint64_t
-#endif
+struct InitData {
+  uintptr_t circ_index;
+  uintptr_t *data;
+  uintptr_t argc;
+};
 
-extern const char _lib_strtab;
-extern uintptr_t _tick_table;
+extern uintptr_t _init_data_size;
+extern struct InitData _init_data[];
+extern const char _lib_strtab[];
+extern uintptr_t _func_table[];
 extern void _trampoline(void);
 
 void *LIBRARY_HANDLES[MAX_LIBRARY_COUNT] = {0};
@@ -57,10 +61,27 @@ void setup_signals(void) {
   }
 }
 
+size_t load_library(struct Library lib, size_t base_index) {
+  for (size_t i = 0; i < lib.circ_count; i++) {
+    CKT_INFO("loaded '%s' from '%s' (n: %04zx)\n", lib.circs[i].name, lib.name,
+             base_index + i);
+    _func_table[2 * (base_index + i)] = (uintptr_t)lib.circs[i].initialise;
+    _func_table[2 * (base_index + i) + 1] = (uintptr_t)lib.circs[i].tick;
+  }
+
+  base_index += lib.circ_count;
+  for (size_t i = 0; i < lib.library_count; i++) {
+    CKT_INFO("discovered module '%s' in %s\n", lib.libraries[i].name, lib.name);
+    base_index = load_library(lib.libraries[i], base_index);
+  }
+
+  return base_index;
+}
+
 void load_libraries(void) {
   size_t library_index = 0;
   size_t circ_index = 0;
-  const char *lib_name = &_lib_strtab;
+  const char *lib_name = _lib_strtab;
   while (*lib_name) {
     void *handle = dlopen(lib_name, RTLD_LAZY | RTLD_LOCAL);
     if (!handle) {
@@ -97,17 +118,41 @@ void load_libraries(void) {
       exit(1);
     }
 
-    struct Library lib = result.lib;
+    CKT_INFO("initialised library '%s'\n", lib_name);
 
-    for (size_t i = 0; i < lib.circ_count; i++) {
-      CKT_INFO("loaded '%s' from '%s' (tick: %p)\n", lib.circs[i].name,
-               lib.name, lib.circs[i].tick);
-      (&_tick_table)[circ_index] = (uintptr_t)lib.circs[i].tick;
-      circ_index++;
-    }
+    struct Library lib = result.lib;
+    circ_index = load_library(lib, circ_index);
 
     lib_name += strlen(lib_name) + 1;
     library_index++;
+  }
+
+  if (library_index == 0)
+    return;
+
+  CKT_INFO("tick table: %zu entries\n", circ_index);
+  CKT_INFO("      n           init           tick\n");
+  for (size_t i = 0; i < circ_index; i++) {
+    CKT_INFO("  [%04zx] %p %p\n", i, _func_table[2 * i],
+             _func_table[2 * i + 1]);
+  }
+}
+
+void initialise_circs(void) {
+  if (_init_data_size == 0)
+    return;
+
+  CKT_INFO("initialising %zu circuits\n", _init_data_size);
+  uint8_t *data_ptr = (uint8_t *)_init_data;
+  for (size_t i = 0; i < _init_data_size; i++) {
+    struct InitData data = *(struct InitData *)data_ptr;
+    InitialiseFn init = (InitialiseFn)_func_table[2 * data.circ_index];
+
+    data_ptr += sizeof(struct InitData);
+
+    init(data.data, data.argc, (struct ConstValue *)(data_ptr));
+
+    data_ptr += data.argc * sizeof(struct ConstValue);
   }
 }
 
@@ -118,8 +163,13 @@ int main(void) {
       .file = stderr,
   };
 
+  CKT_INFO("=============== BEGIN INIT ===============\n");
+
   setup_signals();
   load_libraries();
+  initialise_circs();
+
+  CKT_INFO("===============  END INIT  ===============\n\n");
 
   for (;;) {
     _trampoline();

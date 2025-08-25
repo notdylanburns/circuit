@@ -37,6 +37,10 @@ impl<T> Block<T> {
         self.items.len()
     }
 
+    pub fn addr(&self) -> BlockAddress {
+        (self.id, self.items.len())
+    }
+
     pub fn push(&mut self, item: T) -> BlockAddress {
         let address = self.items.len();
         self.items.push(item);

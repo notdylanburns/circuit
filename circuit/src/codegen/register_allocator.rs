@@ -109,7 +109,7 @@ impl<T: Registers> RegisterAllocator<T> {
         let mut allocations = vec![HashMap::new(); usage.len()];
         let mut active_leases = Vec::with_capacity(usage.len());
 
-        let registers_used_in_location = transpose(&usage);
+        let registers_used_in_location = transpose(usage);
 
         for (cur_location, registers) in registers_used_in_location.iter().enumerate() {
             let required_locations = registers

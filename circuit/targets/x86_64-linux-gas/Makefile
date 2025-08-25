@@ -1,9 +1,12 @@
+ROOT_DIR:=$(shell dirname $(realpath $(firstword $(MAKEFILE_LIST))))
+
 AS ?= as
 CC ?= cc
 LD ?= ld
 
+INC_DIR ?= $(ROOT_DIR)/../../inc/
 ASFLAGS ?= -ggdb
-CFLAGS ?= -Wall -Wextra -O0 -I../../inc/
+CFLAGS ?= -Wall -Wextra -O0 -I$(INC_DIR)
 CFLAGS += -ggdb -fsanitize=address -static-libasan
 LDFLAGS ?=
 
@@ -19,7 +22,7 @@ build: $(TARGET)
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) -o $@ -r $^
 
-%.c.o: %.c $(wildcard *.h)
+%.c.o: %.c $(wildcard $(INC_DIR)/*/*.h)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 %.s.o: %.s

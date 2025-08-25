@@ -1,6 +1,6 @@
 use crate::{
     ansi::{self, AnsiColourType, AnsiModify},
-    loader::{Loader, Module},
+    loader::{Loader, Module, ModuleType},
     util::{LibrarySymbolType, Pos, Position},
 };
 use std::fmt::Write;
@@ -182,16 +182,17 @@ impl Diagnostic {
             .get_module_mut(module_id)
             .unwrap_or_else(|| unreachable!("unknown module in diagnostic: {}", module_id));
 
-        write!(f, "{}{}", bold, module.path_str())?;
+        match module {
+            Module::Module(m) => write!(f, "{}{}", bold, m.path_str())?,
+            Module::Library(m) => write!(f, "{}{}", bold, m.path_str())?,
+            Module::Submodule(m) => write!(f, "TODO: fix diagnostics")?,
+        }
 
         match self.pos() {
             Pos::Pos { line, col, .. } => writeln!(f, ":{}:{} ", line + 1, col + 1)?,
-            Pos::Library(_, t, n) => match t {
-                LibrarySymbolType::Circ => writeln!(f, " CIRCS[{n}]"),
-                LibrarySymbolType::Const => writeln!(f, " CONSTS[{n}]"),
-                LibrarySymbolType::Enum => writeln!(f, " ENUMS[{n}]"),
-                LibrarySymbolType::Library => writeln!(f, " LIBS[{n}]"),
-            }?,
+            Pos::Library(_, defined_at) => {
+                writeln!(f, ":{}:{}", defined_at.line, defined_at.column)?
+            }
             _ => writeln!(f, "")?,
         };
 

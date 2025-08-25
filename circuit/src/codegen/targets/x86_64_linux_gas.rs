@@ -503,7 +503,10 @@ impl<'b> BlockGenerator<'b> {
 
                 self.emit("movq $RUNTIME_STATE, %rsi".to_string());
 
-                self.emit(format!("movq _tick_table+{}(%rip), %rax", c * WORD_SIZE));
+                self.emit(format!(
+                    "movq _func_table+{}(%rip), %rax",
+                    ((2 * c) + 1) * WORD_SIZE
+                ));
 
                 // self.emit_align_stack(16);
 

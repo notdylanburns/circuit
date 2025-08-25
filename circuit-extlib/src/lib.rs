@@ -21,7 +21,7 @@ pub union ConstValueInner {
     pub none: u8,
     pub bool: bool,
     pub int: isize,
-    pub enum_value: &'static str,
+    pub enum_value: *const u8,
 }
 
 #[repr(C)]
@@ -61,7 +61,7 @@ impl std::fmt::Debug for ConstValue {
         match self.t {
             ConstValueType::Bool => write!(f, "ConstValue::Bool({})", unsafe { self.v.bool }),
             ConstValueType::Int => write!(f, "ConstValue::Int({})", unsafe { self.v.int }),
-            ConstValueType::Enum => write!(f, "ConstValue::Enum({})", unsafe { self.v.enum_value }),
+            ConstValueType::Enum => write!(f, "ConstValue::Enum()"),
             ConstValueType::None => write!(f, "ConstValue::None"),
         }
     }
@@ -84,8 +84,17 @@ pub enum TickBehaviour {
 }
 
 #[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct DefinedAt {
+    pub file: *const u8,
+    pub line: u32,
+    pub column: u32,
+}
+
+#[repr(C)]
 #[derive(Debug)]
 pub struct EnumDescriptor {
+    pub defined_at: DefinedAt,
     pub name: *const u8,
     pub variant_count: usize,
     pub variants: *const *const u8,
@@ -94,6 +103,7 @@ pub struct EnumDescriptor {
 #[repr(C)]
 #[derive(Debug)]
 pub struct ArgDescriptor {
+    pub defined_at: DefinedAt,
     pub name: *const u8,
     pub arg_type: ConstType,
     pub default: ConstValue,
@@ -102,6 +112,7 @@ pub struct ArgDescriptor {
 #[repr(C)]
 #[derive(Debug)]
 pub struct Pin {
+    pub defined_at: DefinedAt,
     pub name: *const u8,
     pub width: usize,
     pub direction: PinDirection,
@@ -110,6 +121,7 @@ pub struct Pin {
 #[repr(C)]
 #[derive(Debug)]
 pub struct CircMeta {
+    pub error: *const u8,
     pub mem_size: usize,
     pub pin_count: usize,
     pub pins: *const Pin,
@@ -129,6 +141,7 @@ pub type GetMetaFn = unsafe extern "C" fn(usize, *const ConstValue) -> CircMeta;
 #[repr(C)]
 #[derive(Debug)]
 pub struct CircDescriptor {
+    pub defined_at: DefinedAt,
     pub name: *const u8,
     pub arg_count: usize,
     pub args: *const ArgDescriptor,
@@ -140,6 +153,7 @@ pub struct CircDescriptor {
 #[repr(C)]
 #[derive(Debug)]
 pub struct Library {
+    pub defined_at: DefinedAt,
     pub name: *const u8,
     pub circ_count: usize,
     pub circs: *const CircDescriptor,
@@ -166,8 +180,19 @@ pub struct InitResult {
 }
 
 #[macro_export]
+macro_rules! defined_at {
+    () => {
+        DefinedAt {
+            file: $crate::cstr!(file!()),
+            line: line!(),
+            column: column!(),
+        }
+    };
+}
+
+#[macro_export]
 macro_rules! cstr {
-    ($s:literal) => {
+    ($s:expr) => {
         concat!($s, "\0").as_ptr()
     };
 }
@@ -189,7 +214,7 @@ macro_rules! sa {
 #[macro_export]
 macro_rules! library {
     (
-        name: $name:literal,
+        name: $name:expr,
         circs: $circs:expr,
         enums: $enums:expr,
         libraries: $libraries:expr
@@ -200,6 +225,7 @@ macro_rules! library {
         let libraries = $libraries;
 
         $crate::Library {
+            defined_at: $crate::defined_at!(),
             name: $crate::cstr!($name),
             circ_count: circs.len(),
             circs: circs.as_ptr(),
@@ -214,7 +240,7 @@ macro_rules! library {
 #[macro_export]
 macro_rules! circ {
     (
-        name: $circ_name:literal,
+        name: $circ_name:expr,
         args: $args:expr,
         initialise: $init_fn:expr,
         tick: $tick_fn:expr,
@@ -224,6 +250,7 @@ macro_rules! circ {
         let args = $args;
 
         $crate::CircDescriptor {
+            defined_at: $crate::defined_at!(),
             name: $crate::cstr!($circ_name),
             arg_count: args.len(),
             args: args.as_ptr(),
@@ -231,63 +258,97 @@ macro_rules! circ {
             tick: $tick_fn,
             get_meta: $get_meta_fn,
         }
-    }};
-    (
-        name: $circ_name:literal,
-        args: @[
-            $($t:ident $($name:ident)? $(= $default:expr)?),*
-        ],
-        initialise: $init_fn:expr,
-        tick: $tick_fn:expr,
-        get_meta: $get_meta_fn:expr
-        $(,)?
-    ) => {
-        $crate::circ! {
-            name: name,
-            args: sa![
-                $(
-                    $crate::arg! {
-                        $(name: $name,)?
-                        arg_type: $crate::ArgType::$t,
-                        $(default: $crate::ArgValue {
-                            t: $crate::ArgValueType::$t,
-                            v: $crate::ArgValueInner {
-                                $(
-                                    $name: $default,
-                                )?
-                                none: 0,
-                            },
-                        })?
-                    }
-                )*
-            ]
-        }
-    };
+    }}; // (
+        //     name: $circ_name:expr,
+        //     args: @[
+        //         $($t:ident $($name:ident)? $(= $default:expr)?),*
+        //     ],
+        //     initialise: $init_fn:expr,
+        //     tick: $tick_fn:expr,
+        //     get_meta: $get_meta_fn:expr
+        //     $(,)?
+        // ) => {
+        //     $crate::circ! {
+        //         name: name,
+        //         args: sa![
+        //             $(
+        //                 $crate::arg! {
+        //                     $(name: $name,)?
+        //                     arg_type: $crate::ArgType::$t,
+        //                     $(default: $crate::ArgValue {
+        //                         t: $crate::ArgValueType::$t,
+        //                         v: $crate::ArgValueInner {
+        //                             $(
+        //                                 $name: $default,
+        //                             )?
+        //                             none: 0,
+        //                         },
+        //                     })?
+        //                 }
+        //             )*
+        //         ]
+        //     }
+        // };
 }
 
 #[macro_export]
 macro_rules! arg {
     (
-        name: $name:literal,
+        name: $name:expr,
         arg_type: $arg_type:expr
         $(,)?
     ) => {
         $crate::ArgDescriptor {
+            defined_at: $crate::defined_at!(),
             name: $crate::cstr!($name),
             arg_type: $arg_type,
-            default: $crate::ArgValue::NONE,
+            default: $crate::ConstValue::NONE,
         }
     };
     (
-        name: $name:literal,
+        name: $name:expr,
         arg_type: $arg_type:expr,
         default: $default:expr
         $(,)?
     ) => {
         $crate::ArgDescriptor {
+            defined_at: $crate::defined_at!(),
             name: $crate::cstr!($name),
             arg_type: $arg_type,
             default: $default,
+        }
+    };
+    ($t:ident $($name:ident)? $(= $default:expr)?) => {
+        $crate::arg! {
+            $(name: stringify!($name),)?
+            arg_type: $crate::ConstType::$t,
+            $(default: $crate::ConstValue::from($default),)?
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! pin {
+    (
+        name: $name:expr,
+        direction: $direction:expr,
+        width: $width:expr
+        $(,)?
+    ) => {
+        $crate::Pin {
+            defined_at: $crate::defined_at!(),
+            name: $crate::cstr!($name),
+            width: $width,
+            direction: $direction,
+        }
+    };
+    (
+        $direction:ident $name:ident[$width:expr]
+    ) => {
+        $crate::pin! {
+            name: stringify!($name),
+            direction: $crate::PinDirection::$direction,
+            width: $width,
         }
     };
 }
@@ -303,6 +364,7 @@ macro_rules! circ_meta {
         let pins = $pins;
 
         $crate::CircMeta {
+            error: std::ptr::null(),
             mem_size: $mem_size,
             pin_count: pins.len(),
             pins: pins.as_ptr(),
@@ -325,6 +387,7 @@ macro_rules! circ_meta {
             pins: sa![
                 $(
                     $crate::Pin {
+                        defined_at: $crate::defined_at!(),
                         name: $crate::cstr!($name),
                         width: $w,
                         direction: $crate::PinDirection::$direction,
@@ -339,7 +402,7 @@ macro_rules! circ_meta {
 // Rust only abstractions
 
 pub mod rust {
-    use super::{BuildConst, CircMeta, ConstValue, ConstValueType, RuntimeState};
+    use super::{BuildConst, CircMeta, ConstValue, ConstValueType, RuntimeState, TickBehaviour};
     use std::collections::HashMap;
 
     pub type Args<'a> = &'a [ExtractedConst];
@@ -441,16 +504,29 @@ pub mod rust {
     pub trait Circ {
         fn new(args: Args) -> Self;
         fn tick_internal(&mut self, state: &mut SimState);
-        fn get_meta_internal(args: Args) -> CircMeta;
+        fn get_meta_internal(args: Args) -> Result<CircMeta, &'static str>;
     }
 
     pub trait CircDesc<C: Circ> {
+        /// # Safety
+        ///
+        /// The caller must ensure that `this` is a valid pointer to a block of size
+        /// `Self::get_meta().mem_size`, and that `argv` is a valid pointer to an array of
+        /// `ConstValue` of length `argc`. The values in `argv` must be valid for the circuit.
         unsafe extern "C" fn initialise(this: *mut (), argc: usize, argv: *const ConstValue) {
             let this = this.cast();
             let args = extract_consts(std::slice::from_raw_parts(argv, argc)).collect::<Vec<_>>();
             *this = C::new(&args);
         }
 
+        /// # Safety
+        ///
+        /// The caller must ensure that `this` is a valid pointer to a block of size
+        /// Self::get_meta().mem_size, and that it has been initialised with a call to
+        /// Self::initialise. `runtime_state` must be a valid, non-null pointer to a
+        /// `RuntimeState` struct. `inputs` and `outputs` must point to a slice of `usize`,
+        /// long enough to hold at least the amount of bits to represent the Input/Output
+        /// pins returned by Self::get_meta(), or be `null` in case there are no pins of that type.
         unsafe extern "C" fn tick(
             this: *mut (),
             runtime_state: *const RuntimeState,
@@ -469,18 +545,30 @@ pub mod rust {
             );
         }
 
+        /// # Safety
+        ///
+        /// The caller must ensure that `argv` is a valid pointer to an array of `ConstValue`
+        /// of length `argc`, and that the values in `argv` are valid for the circuit.
         unsafe extern "C" fn get_meta(argc: usize, argv: *const ConstValue) -> CircMeta {
             let args = extract_consts(std::slice::from_raw_parts(argv, argc)).collect::<Vec<_>>();
-            C::get_meta_internal(&args)
+            match C::get_meta_internal(&args) {
+                Ok(meta) => meta,
+                Err(e) => CircMeta {
+                    error: e.as_ptr(),
+                    mem_size: 0,
+                    pin_count: 0,
+                    pins: std::ptr::null(),
+                    tick_behaviour: TickBehaviour::Always,
+                },
+            }
         }
     }
 
     impl<T: Circ> CircDesc<T> for T {}
 
-    pub fn get_build_consts(
-        argc: usize,
-        argv: *const BuildConst,
-    ) -> HashMap<&'static str, ConstValue> {
+    pub type BuildConsts = HashMap<&'static str, ConstValue>;
+
+    pub fn get_build_consts(argc: usize, argv: *const BuildConst) -> BuildConsts {
         let argv = unsafe { std::slice::from_raw_parts(argv, argc) };
         argv.iter()
             .map(|arg| unsafe {
@@ -517,7 +605,7 @@ pub mod rust {
             ConstValue {
                 t: ConstValueType::Enum,
                 v,
-            } => ExtractedConst::EnumValue(unsafe { v.enum_value.to_string() }),
+            } => ExtractedConst::EnumValue(todo!()),
         }
     }
 

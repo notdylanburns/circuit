@@ -6,8 +6,8 @@ use std::rc::Rc;
 
 use crate::{
     analyser::{
-        Circ, CircId, Connection, ConnectionEndpoint, ConnectionRange, LibraryCirc, ModuleCirc,
-        Pin, PinId,
+        Circ, CircId, Connection, ConnectionEndpoint, ConnectionRange, ConstValue, LibraryCirc,
+        ModuleCirc, Pin, PinId,
     },
     ast::PinDirection,
     optimiser::{BitEndpoint, OptimiserUnit, TruthTable},
@@ -628,6 +628,7 @@ pub struct IrGen<'a, Word: WordTrait> {
     external_libraries: Vec<Rc<Path>>,
     sections: Sections<Word>,
     code_blocks: HashMap<usize, usize>,
+    initialisers: Vec<(usize, BlockAddress, Box<[circuit_extlib::ConstValue]>)>,
 }
 
 impl<'a, Word: WordTrait> IrGen<'a, Word>
@@ -645,6 +646,7 @@ where
             external_libraries,
             sections: Sections::default(),
             code_blocks: HashMap::new(),
+            initialisers: Vec::with_capacity(units.len()),
         }
     }
 
@@ -844,10 +846,10 @@ where
         strtab.id
     }
 
-    fn emit_tick_table(&mut self) -> usize {
+    fn emit_functable(&mut self) -> usize {
         let tick_table = self.sections.new_data();
 
-        tick_table.reserve(self.external_circ_count);
+        tick_table.reserve(self.external_circ_count * 2);
 
         tick_table.id
     }
@@ -873,19 +875,68 @@ macro_rules! word_size_impl {
                 let lib_strtab_id = self.emit_lib_strtab();
                 self.sections.label("_lib_strtab", (lib_strtab_id, 0));
 
-                let tick_table_id = self.emit_tick_table();
-                self.sections.label("_tick_table", (tick_table_id, 0));
+                let tick_table_id = self.emit_functable();
+                self.sections.label("_func_table", (tick_table_id, 0));
 
                 let (main_code_block_id, main_resv_block_id) = self.emit_circ_blocks(main, circ);
 
                 self.sections.label("_main", (main_code_block_id, 0));
                 self.sections.label("_main_data", (main_resv_block_id, 0));
 
+                let init_block_id = self.emit_initialiser_block();
+
+                self.sections.label("_init_data_size", (init_block_id, 0));
+                self.sections.label("_init_data", (init_block_id, 1));
+
                 self.sections
+            }
+
+            fn emit_initialiser_block(&mut self) -> usize {
+                // TODO: update this to be in RODATA
+                let init_block = self.sections.new_data();
+                init_block.push(DataItem::Word(self.initialisers.len() as $t));
+
+                for (circ_index, resv_addr, args) in self.initialisers.iter() {
+                    init_block.push(DataItem::Word(*circ_index as $t));
+                    init_block.push(DataItem::Address(*resv_addr));
+                    init_block.push(DataItem::Word(args.len() as $t));
+
+                    let bytes_required = args.len() * std::mem::size_of::<circuit_extlib::ConstValue>();
+                    let words_required = div_up(bytes_required, std::mem::size_of::<$t>());
+                    let mut words: Vec<$t> = vec![0; words_required];
+
+                    dbg!(args.len());
+                    dbg!(bytes_required, words_required);
+
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            args.as_ptr() as *const u8,
+                            words.as_mut_ptr() as *mut u8,
+                            words_required * std::mem::size_of::<$t>(),
+                        );
+                    };
+
+                    for word in words {
+                        init_block.push(DataItem::Word(word));
+                    };
+                };
+
+                init_block.id
             }
 
             fn emit_circ_blocks(&mut self, unit_id: usize, circ: &Circ) -> (usize, usize) {
                 let resv_block_id = self.emit_circ_resv_block(circ);
+
+                match circ {
+                    Circ::LibraryCirc(c) => {
+                        self.initialisers.push((
+                            c.circ_index,
+                            (resv_block_id, LibraryCircResvBlock::<$t>::get_resv_offset(c)),
+                            c.signature.get_library_circ_args().into_boxed_slice(),
+                        ));
+                    },
+                    _ => (),
+                };
 
                 if let Some(&code_block_id) = self.code_blocks.get(&unit_id) {
                     return (code_block_id, resv_block_id);

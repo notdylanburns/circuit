@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 macro_rules! from_ffi_str {
     ($s:expr) => {
         <Box<str>>::from_ffi(&$s)
@@ -32,8 +34,31 @@ impl FromFfi for Box<str> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DefinedAt {
+    pub file: &'static str,
+    pub line: u32,
+    pub column: u32,
+}
+
+impl FromFfi for DefinedAt {
+    type Ffi = circuit_extlib::DefinedAt;
+
+    unsafe fn from_ffi(from: &Self::Ffi) -> Self {
+        Self {
+            file: std::ffi::CStr::from_ptr(from.file as *const i8)
+                .to_str()
+                .expect("invalid utf-8 in FFI string")
+                .into(),
+            line: from.line,
+            column: from.column,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct EnumDescriptor {
+    pub defined_at: DefinedAt,
     pub name: Box<str>,
     pub variants: Box<[Box<str>]>,
 }
@@ -43,6 +68,7 @@ impl FromFfi for EnumDescriptor {
 
     unsafe fn from_ffi(from: &Self::Ffi) -> Self {
         Self {
+            defined_at: DefinedAt::from_ffi(&from.defined_at),
             name: from_ffi_str!(from.name),
             variants: from_ffi_array!(Box<str>, from.variants, from.variant_count),
         }
@@ -51,6 +77,7 @@ impl FromFfi for EnumDescriptor {
 
 #[derive(Debug)]
 pub struct ArgDescriptor {
+    pub defined_at: DefinedAt,
     pub name: Box<str>,
     pub arg_type: circuit_extlib::ConstType,
     pub default: circuit_extlib::rust::ExtractedConst,
@@ -61,6 +88,7 @@ impl FromFfi for ArgDescriptor {
 
     unsafe fn from_ffi(from: &Self::Ffi) -> Self {
         Self {
+            defined_at: DefinedAt::from_ffi(&from.defined_at),
             name: from_ffi_str!(from.name),
             arg_type: from.arg_type,
             default: circuit_extlib::rust::extract_const(&from.default),
@@ -70,6 +98,7 @@ impl FromFfi for ArgDescriptor {
 
 #[derive(Debug)]
 pub struct Pin {
+    pub defined_at: DefinedAt,
     pub name: Box<str>,
     pub width: usize,
     pub direction: circuit_extlib::PinDirection,
@@ -80,6 +109,7 @@ impl FromFfi for Pin {
 
     unsafe fn from_ffi(from: &Self::Ffi) -> Self {
         Self {
+            defined_at: DefinedAt::from_ffi(&from.defined_at),
             name: from_ffi_str!(from.name),
             width: from.width,
             direction: from.direction,
@@ -105,18 +135,8 @@ impl FromFfi for CircMeta {
     }
 }
 
-impl CircMeta {
-    pub fn to_ffi(&self) -> circuit_extlib::CircMeta {
-        circuit_extlib::CircMeta {
-            mem_size: self.mem_size,
-            pin_count: self.pins.len(),
-            pins: self.pins.as_ptr() as *const circuit_extlib::Pin,
-            tick_behaviour: self.tick_behaviour,
-        }
-    }
-}
-
 pub struct CircDescriptor {
+    pub defined_at: DefinedAt,
     pub name: Box<str>,
     pub args: Box<[ArgDescriptor]>,
     pub initialise: circuit_extlib::InitialiserFn,
@@ -129,6 +149,7 @@ impl FromFfi for CircDescriptor {
 
     unsafe fn from_ffi(from: &Self::Ffi) -> Self {
         Self {
+            defined_at: DefinedAt::from_ffi(&from.defined_at),
             name: from_ffi_str!(from.name),
             args: from_ffi_array!(ArgDescriptor, from.args, from.arg_count),
             initialise: from.initialise,
@@ -139,6 +160,7 @@ impl FromFfi for CircDescriptor {
 }
 
 pub struct Library {
+    pub defined_at: DefinedAt,
     pub name: Box<str>,
     pub circs: Box<[CircDescriptor]>,
     pub enums: Box<[EnumDescriptor]>,
@@ -150,6 +172,7 @@ impl FromFfi for Library {
 
     unsafe fn from_ffi(from: &Self::Ffi) -> Self {
         Self {
+            defined_at: DefinedAt::from_ffi(&from.defined_at),
             name: from_ffi_str!(from.name),
             circs: from_ffi_array!(CircDescriptor, from.circs, from.circ_count),
             enums: from_ffi_array!(EnumDescriptor, from.enums, from.enum_count),

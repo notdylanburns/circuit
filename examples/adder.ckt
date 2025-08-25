@@ -1,0 +1,71 @@
+import core;
+
+use core:bus:Constant as C;
+use core:debug:probe:Probe as P;
+use core:logic:And;
+use core:logic:Or;
+use core:logic:Xor;
+
+circ Adder {
+    -> a, b, c_in;
+    <- q, c_out;
+
+    with {
+        Xor x1, x2;
+        And a1, a2;
+        Or o1;
+    }
+
+    a -> x1.a;
+    b -> x1.b;
+
+    x1.q -> x2.a;
+    c_in -> x2.b;
+
+    x2.q -> q;
+
+    x1.q -> a2.a;
+    c_in -> a2.b;
+
+    a -> a1.a;
+    b -> a1.b;
+
+    a1.q -> o1.a;
+    a2.q -> o1.b;
+
+    o1.q -> c_out;
+}
+
+circ Main {
+    with {
+        C(0, 1) zero;
+        C(6, 4) x;
+        C(3, 4) y;
+
+        P(5) p;
+
+        Adder a1, a2, a3, a4;
+    }
+
+    zero.q -> a1.c_in;
+    x.q[0] -> a1.a;
+    y.q[0] -> a1.b;
+
+    a1.c_out -> a2.c_in;
+    x.q[1] -> a2.a;
+    y.q[1] -> a2.b;
+
+    a2.c_out -> a3.c_in;
+    x.q[2] -> a3.a;
+    y.q[2] -> a3.b;
+
+    a3.c_out -> a4.c_in;
+    x.q[3] -> a4.a;
+    y.q[3] -> a4.b;
+
+    a1.q -> p.a[0];
+    a2.q -> p.a[1];
+    a3.q -> p.a[2];
+    a4.q -> p.a[3];
+    a4.c_out -> p.a[4];
+}

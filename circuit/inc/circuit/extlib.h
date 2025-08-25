@@ -31,13 +31,21 @@ enum TickBehaviour {
   TICK_ONCE,
 };
 
+struct DefinedAt {
+  const char *file;
+  const uint32_t line;
+  const uint32_t column;
+};
+
 struct ArgDescriptor {
+  const struct DefinedAt defined_at;
   const char *name;
   const enum ConstType type;
   const struct ConstValue default_value;
 };
 
 struct Pin {
+  const struct DefinedAt defined_at;
   const char *name;
   const uintptr_t width;
   const enum PinDirection direction;
@@ -49,21 +57,27 @@ struct CircMeta {
   const enum TickBehaviour tick_behaviour;
 };
 
+typedef void (*InitialiseFn)(void *, uintptr_t, struct ConstValue *);
+typedef void (*TickFn)(void *, void *);
+typedef struct CircMeta (*GetMetaFn)(void *);
+
 struct CircDescriptor {
+  const struct DefinedAt defined_at;
   const char *name;
   const uintptr_t arg_count;
   const struct ArgDescriptor *args;
-  void (*const initialise)(void *mem, void *_args);
-  void (*const tick)(void *circ, void *_state);
-  struct CircMeta (*const get_meta)(void *circ);
+  InitialiseFn initialise;
+  TickFn tick;
+  GetMetaFn get_meta;
 };
 
 struct Library {
+  const struct DefinedAt defined_at;
   const char *name;
   const uintptr_t circ_count;
   const struct CircDescriptor *circs;
-  const uintptr_t const_count;
-  const void *consts;
+  // const uintptr_t const_count;
+  // const void *consts;
   const uintptr_t enum_count;
   const void *enums;
   const uintptr_t library_count;
